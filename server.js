@@ -125,6 +125,9 @@ const defaultSettings = {
   backup_folder: '',
   backup_folder2: '',
   backup_auto: '0',
+  logo_bayi: '/img/ram-logo.jpg',
+  logo_servis: '/img/ram-logo.jpg',
+  logo_admin: '/img/ram-logo.jpg',
   products: [
     'Daikin 12000 BTU Inverter Klima',
     'Daikin 18000 BTU Inverter Klima',
@@ -175,6 +178,15 @@ function getSettings() {
   rows.forEach(r => s[r.key] = r.value);
   return s;
 }
+
+// Role göre teklif logosu seç (bayi / servis / admin)
+function logoForRole(role, s) {
+  s = s || getSettings();
+  if (role === 'bayi') return s.logo_bayi || '/img/ram-logo.jpg';
+  if (role === 'servis') return s.logo_servis || '/img/ram-logo.jpg';
+  return s.logo_admin || '/img/ram-logo.jpg';
+}
+function roleLabel(role) { return role === 'bayi' ? 'Bayi' : role === 'servis' ? 'Servis' : 'Yönetici'; }
 
 // --- Yedekleme yardımcıları ---
 const BACKUP_TABLES = ['users','customers','sales','payments','stock','quotes','quote_items','stock_movements','transactions','settings'];
@@ -358,12 +370,22 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS transactions (
   created_at TEXT DEFAULT (datetime('now','+3 hours'))
 )`); } catch {}
 
-// Varsayılan admin
-const adminExists = db.prepare("SELECT COUNT(*) as c FROM users").get().c;
-if (adminExists === 0) {
-  const hash = bcrypt.hashSync('admin123', 10);
-  db.prepare("INSERT INTO users(username,password,name) VALUES(?,?,?)").run('admin', hash, 'Yönetici');
+// Rol & sahiplik (bayi / servis / admin) — çok hesaplı yapı
+try { db.exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'"); } catch {}
+for (const t of ['quotes', 'sales', 'customers', 'stock', 'transactions']) {
+  try { db.exec(`ALTER TABLE ${t} ADD COLUMN owner_role TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE ${t} ADD COLUMN owner_name TEXT`); } catch {}
 }
+
+// Varsayılan hesaplar: süper admin + bayi + servis
+const ensureUser = (username, plainPass, name, role) => {
+  const ex = db.prepare('SELECT id FROM users WHERE username=?').get(username);
+  if (!ex) db.prepare('INSERT INTO users(username,password,name,role) VALUES(?,?,?,?)').run(username, bcrypt.hashSync(plainPass, 10), name, role);
+};
+ensureUser('admin', 'admin123', 'Yönetici', 'admin');
+ensureUser('bayi', 'bayi123', 'Bayi', 'bayi');
+ensureUser('servis', 'servis123', 'Servis', 'servis');
+try { db.exec("UPDATE users SET role='admin' WHERE role IS NULL OR role=''"); } catch {}
 
 const q = {
   all: (sql, ...p) => db.prepare(sql).all(...p),
@@ -386,6 +408,12 @@ function auth(req, res, next) {
   if (req.session.user) return next();
   res.redirect('/giris');
 }
+// Sadece süper admin
+function adminOnly(req, res, next) {
+  if (req.session.user && req.session.user.role === 'admin') return next();
+  req.session.flash = { type: 'error', msg: 'Bu sayfa sadece yöneticiye açıktır' };
+  res.redirect('/');
+}
 
 app.use((req, res, next) => {
   res.locals.user = req.session.user || null;
@@ -393,6 +421,8 @@ app.use((req, res, next) => {
   req.session.flash = null;
   res.locals.money = (n) => Number(n || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2 }) + ' TL';
   res.locals.settings = getSettings();
+  res.locals.logoFor = (role) => logoForRole(role, res.locals.settings);
+  res.locals.roleLabel = roleLabel;
   next();
 });
 
@@ -405,7 +435,7 @@ app.post('/giris', (req, res) => {
     req.session.flash = { type: 'error', msg: 'Kullanıcı adı veya şifre hatalı' };
     return res.redirect('/giris');
   }
-  req.session.user = { id: user.id, name: user.name, username: user.username };
+  req.session.user = { id: user.id, name: user.name, username: user.username, role: user.role || 'admin' };
   res.redirect('/');
 });
 app.get('/cikis', (req, res) => { req.session.destroy(); res.redirect('/giris'); });
@@ -441,7 +471,7 @@ app.post('/musteri/kaydet', auth, (req, res) => {
     req.session.flash = { type: 'success', msg: 'Müşteri güncellendi' };
     return res.redirect('/musteri/' + id);
   }
-  const r = q.run('INSERT INTO customers(name,phone,email,address,city,notes) VALUES(?,?,?,?,?,?)', name, phone, email, address, city, notes);
+  const r = q.run('INSERT INTO customers(name,phone,email,address,city,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?)', name, phone, email, address, city, notes, req.session.user.role, req.session.user.name);
   req.session.flash = { type: 'success', msg: 'Müşteri eklendi' };
   res.redirect('/musteri/' + r.lastInsertRowid);
 });
@@ -492,8 +522,8 @@ app.post('/satis/kaydet', auth, (req, res) => {
     req.session.flash = { type: 'success', msg: 'Satış güncellendi' };
     return res.redirect('/satis/' + id);
   }
-  const r = q.run('INSERT INTO sales(customer_id,product_name,ic_unite_seri,dis_unite_seri,sale_date,price,paid_amount,payment_method,payment_status,notes) VALUES(?,?,?,?,?,?,?,?,?,?)',
-    customer_id, product_name, ic_unite_seri, dis_unite_seri, sale_date, price, paid, payment_method, status, notes);
+  const r = q.run('INSERT INTO sales(customer_id,product_name,ic_unite_seri,dis_unite_seri,sale_date,price,paid_amount,payment_method,payment_status,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    customer_id, product_name, ic_unite_seri, dis_unite_seri, sale_date, price, paid, payment_method, status, notes, req.session.user.role, req.session.user.name);
   req.session.flash = { type: 'success', msg: 'Satış kaydedildi' };
   res.redirect('/satis/' + r.lastInsertRowid);
 });
@@ -652,8 +682,8 @@ app.post('/teklif/kaydet', auth, (req, res) => {
     quoteId = id;
     q.run('DELETE FROM quote_items WHERE quote_id=?', quoteId);
   } else {
-    const r = q.run('INSERT INTO quotes(customer_id,customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,tax_rate,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, Number(tax_rate) || 20, notes || '');
+    const r = q.run('INSERT INTO quotes(customer_id,customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,tax_rate,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, Number(tax_rate) || 20, notes || '', req.session.user.role, req.session.user.name);
     quoteId = r.lastInsertRowid;
   }
 
@@ -673,7 +703,8 @@ app.get('/teklif/:id/editor', auth, (req, res) => {
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const settings = getSettings();
-  res.render('quote-editor', { quote, items, settings, layout: false });
+  const printLogo = logoForRole(quote.owner_role, settings);
+  res.render('quote-editor', { quote, items, settings, printLogo, layout: false });
 });
 
 // --- API: Belge Düzenleyiciden Kaydet ---
@@ -732,7 +763,8 @@ app.get('/teklif/:id/yazdir', auth, (req, res) => {
   const tax = afterDiscount * quote.tax_rate / 100;
   const total = afterDiscount + tax;
   const settings = getSettings();
-  res.render('quote-print', { quote, items, subtotal, discount, afterDiscount, tax, total, settings, layout: false });
+  const printLogo = logoForRole(quote.owner_role, settings);
+  res.render('quote-print', { quote, items, subtotal, discount, afterDiscount, tax, total, settings, printLogo, layout: false });
 });
 
 app.get('/teklif/:id/excel', auth, async (req, res) => {
@@ -924,7 +956,7 @@ app.post('/stok/kaydet', auth, (req, res) => {
     q.run('UPDATE stock SET product_name=?,sku=?,quantity=?,min_quantity=?,unit_cost=?,category=? WHERE id=?', product_name, sku, Number(quantity), Number(min_quantity), Number(unit_cost), category, id);
     req.session.flash = { type: 'success', msg: 'Stok güncellendi' };
   } else {
-    const r = q.run('INSERT INTO stock(product_name,sku,quantity,min_quantity,unit_cost,category) VALUES(?,?,?,?,?,?)', product_name, sku, Number(quantity), Number(min_quantity), Number(unit_cost), category);
+    const r = q.run('INSERT INTO stock(product_name,sku,quantity,min_quantity,unit_cost,category,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?)', product_name, sku, Number(quantity), Number(min_quantity), Number(unit_cost), category, req.session.user.role, req.session.user.name);
     q.run('INSERT INTO stock_movements(stock_id,type,quantity,note,user_name) VALUES(?,?,?,?,?)', r.lastInsertRowid, 'giris', Number(quantity), 'İlk stok girişi', req.session.user.name);
     req.session.flash = { type: 'success', msg: 'Stok eklendi' };
   }
@@ -979,7 +1011,7 @@ app.post('/kasa/kaydet', auth, (req, res) => {
   const { id, type, category, amount, tx_date, description } = req.body;
   const t = type === 'gider' ? 'gider' : 'gelir';
   if (id) q.run('UPDATE transactions SET type=?,category=?,amount=?,tx_date=?,description=? WHERE id=?', t, category, Number(amount), tx_date, description, id);
-  else q.run('INSERT INTO transactions(type,category,amount,tx_date,description) VALUES(?,?,?,?,?)', t, category, Number(amount), tx_date, description);
+  else q.run('INSERT INTO transactions(type,category,amount,tx_date,description,owner_role,owner_name) VALUES(?,?,?,?,?,?,?)', t, category, Number(amount), tx_date, description, req.session.user.role, req.session.user.name);
   req.session.flash = { type: 'success', msg: 'Kayıt eklendi' };
   res.redirect('/kasa');
 });
@@ -1072,11 +1104,66 @@ app.post('/ayarlar/sifre', auth, (req, res) => {
   res.redirect('/ayarlar');
 });
 
+// --- Logo yükleme (Bayi / Servis / Yönetici) — sadece admin ---
+const PUB_IMG = path.join(__dirname, 'public', 'img');
+app.post('/ayarlar/logo', auth, adminOnly, upload.fields([{ name: 'logo_bayi', maxCount: 1 }, { name: 'logo_servis', maxCount: 1 }, { name: 'logo_admin', maxCount: 1 }]), (req, res) => {
+  try {
+    if (!fs.existsSync(PUB_IMG)) fs.mkdirSync(PUB_IMG, { recursive: true });
+    const saveLogo = (field) => {
+      const f = req.files && req.files[field] && req.files[field][0];
+      if (!f) return;
+      let ext = (path.extname(f.originalname) || '.png').toLowerCase();
+      if (!['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) ext = '.png';
+      const fname = field.replace('logo_', 'logo-') + ext; // logo-bayi.png
+      fs.copyFileSync(f.path, path.join(PUB_IMG, fname));
+      try { fs.unlinkSync(f.path); } catch {}
+      q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', field, '/img/' + fname + '?v=' + Date.now());
+    };
+    saveLogo('logo_bayi'); saveLogo('logo_servis'); saveLogo('logo_admin');
+    req.session.flash = { type: 'success', msg: 'Logolar güncellendi' };
+  } catch (e) {
+    req.session.flash = { type: 'error', msg: 'Logo yüklenemedi: ' + e.message };
+  }
+  res.redirect('/ayarlar');
+});
+
+// --- Hesap yönetimi (süper admin) ---
+app.get('/hesaplar', auth, adminOnly, (req, res) => {
+  const users = q.all("SELECT id, username, name, role, created_at FROM users ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'bayi' THEN 1 WHEN 'servis' THEN 2 ELSE 3 END, id");
+  res.render('accounts', { users, page: 'accounts', title: 'Hesaplar' });
+});
+app.post('/hesaplar/sifre', auth, adminOnly, (req, res) => {
+  const { id, new_password } = req.body;
+  if (!new_password || new_password.length < 4) { req.session.flash = { type: 'error', msg: 'Şifre en az 4 karakter olmalı' }; return res.redirect('/hesaplar'); }
+  q.run('UPDATE users SET password=? WHERE id=?', bcrypt.hashSync(new_password, 10), id);
+  req.session.flash = { type: 'success', msg: 'Şifre güncellendi' };
+  res.redirect('/hesaplar');
+});
+app.post('/hesaplar/ekle', auth, adminOnly, (req, res) => {
+  const { username, name, role, password } = req.body;
+  if (!username || !password) { req.session.flash = { type: 'error', msg: 'Kullanıcı adı ve şifre gerekli' }; return res.redirect('/hesaplar'); }
+  const r = ['admin', 'bayi', 'servis'].includes(role) ? role : 'bayi';
+  try {
+    q.run('INSERT INTO users(username,password,name,role) VALUES(?,?,?,?)', username.trim(), bcrypt.hashSync(password, 10), name || username, r);
+    req.session.flash = { type: 'success', msg: 'Hesap eklendi' };
+  } catch (e) { req.session.flash = { type: 'error', msg: 'Bu kullanıcı adı zaten var' }; }
+  res.redirect('/hesaplar');
+});
+app.post('/hesaplar/sil', auth, adminOnly, (req, res) => {
+  const u = q.get('SELECT * FROM users WHERE id=?', req.body.id);
+  const adminCount = q.get("SELECT COUNT(*) c FROM users WHERE role='admin'").c;
+  if (u && u.role === 'admin' && adminCount <= 1) { req.session.flash = { type: 'error', msg: 'Son yönetici hesabı silinemez' }; return res.redirect('/hesaplar'); }
+  if (u && u.id === req.session.user.id) { req.session.flash = { type: 'error', msg: 'Kendi hesabını silemezsin' }; return res.redirect('/hesaplar'); }
+  q.run('DELETE FROM users WHERE id=?', req.body.id);
+  req.session.flash = { type: 'success', msg: 'Hesap silindi' };
+  res.redirect('/hesaplar');
+});
+
 // API: Create customer from sale form
 app.post('/api/musteri/ekle', auth, (req, res) => {
   const { name, phone, city, address } = req.body;
   if (!name) return res.json({ error: 'Ad Soyad gerekli' });
-  const result = q.run('INSERT INTO customers(name,phone,city,address) VALUES(?,?,?,?)', name, phone || '', city || '', address || '');
+  const result = q.run('INSERT INTO customers(name,phone,city,address,owner_role,owner_name) VALUES(?,?,?,?,?,?)', name, phone || '', city || '', address || '', req.session.user.role, req.session.user.name);
   res.json({ id: Number(result.lastInsertRowid) });
 });
 
@@ -1095,7 +1182,20 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
   const total = afterDiscount + tax;
   const money = (n) => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2 }) + ' ₺';
 
-  const { Document, Paragraph, Table, TableRow, TableCell, TextRun, WidthType, AlignmentType, BorderStyle, HeadingLevel, ShadingType } = docx;
+  const { Document, Paragraph, Table, TableRow, TableCell, TextRun, WidthType, AlignmentType, BorderStyle, HeadingLevel, ShadingType, ImageRun } = docx;
+
+  // Role göre logo (bayi/servis/admin) — varsa Word başına resim ekle
+  let logoParas = [];
+  try {
+    const lp = logoForRole(quote.owner_role, settings).split('?')[0];
+    const abs = path.join(__dirname, 'public', lp.replace(/^\//, ''));
+    if (fs.existsSync(abs)) {
+      const ext = path.extname(abs).slice(1).toLowerCase();
+      const okTypes = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' };
+      const t = okTypes[ext];
+      if (t) logoParas = [new Paragraph({ children: [new ImageRun({ type: t, data: fs.readFileSync(abs), transformation: { width: 150, height: 90 }, altText: { title: 'Logo', description: 'Logo', name: 'Logo' } })], spacing: { after: 120 } })];
+    }
+  } catch {}
 
   const redColor = '2563EB';
   const grayBg = 'F8F8F8';
@@ -1149,6 +1249,7 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
   const doc = new Document({
     sections: [{
       children: [
+        ...logoParas,
         new Paragraph({ children: [new TextRun({ text: settings.company_name || 'RAM İKLİMLENDİRME', bold: true, size: 40, color: redColor, font: 'Segoe UI' })], spacing: { after: 50 } }),
         new Paragraph({ children: [new TextRun({ text: settings.company_subtitle || '', color: '666666', size: 18, font: 'Segoe UI' })], spacing: { after: 100 } }),
         new Paragraph({ children: [new TextRun({ text: `${settings.owner_name}  |  ${settings.address}  |  Tel: ${settings.phone}`, color: '666666', size: 18, font: 'Segoe UI' })], alignment: AlignmentType.RIGHT, spacing: { after: 200 } }),

@@ -80,7 +80,13 @@
           </div>
           <div>
             <label class="text-muted text-sm block mb-1">Kategori</label>
-            <input name="category" id="sf-cat" value="Klima" class="w-full bg-bg border border-border rounded-lg px-4 py-3 text-white focus:border-red focus:outline-none">
+            <input name="category" id="sf-cat" value="Klima" list="cat-list" class="w-full bg-bg border border-border rounded-lg px-4 py-3 text-white focus:border-red focus:outline-none" placeholder="Klima / Yedek Parça">
+            <datalist id="cat-list">
+              <option value="Klima"></option>
+              <option value="Yedek Parça"></option>
+              <option value="Aksesuar"></option>
+              <option value="Sarf Malzeme"></option>
+            </datalist>
           </div>
         </div>
         <div class="flex gap-2">

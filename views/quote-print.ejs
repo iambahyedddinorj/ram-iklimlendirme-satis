@@ -54,7 +54,7 @@
 
   <div class="header">
     <div>
-      <img src="/img/ram-logo.jpg" alt="Ram İklimlendirme" class="logo-img">
+      <img src="<%= typeof printLogo!=='undefined' ? printLogo : '/img/ram-logo.jpg' %>" alt="<%= settings.company_name || 'Ram İklimlendirme' %>" class="logo-img">
       <div class="logo"><%= settings.company_name || 'RAM İKLİMLENDİRME' %><small><%= settings.company_subtitle || '' %></small></div>
     </div>
     <div class="company-info">

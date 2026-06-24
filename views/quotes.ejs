@@ -29,7 +29,11 @@
         <% quotes.forEach(q => { %>
         <tr class="border-b border-border/30 hover:bg-white/5 cursor-pointer" onclick="location.href='/teklif/<%= q.id %>'">
           <td class="py-3 px-4 text-muted">#<%= q.id %></td>
-          <td class="py-3 px-4"><span class="text-red font-medium"><%= q.customer_name || '-' %></span><% if (q.customer_phone) { %><br><span class="text-muted text-xs"><%= q.customer_phone %></span><% } %></td>
+          <td class="py-3 px-4">
+            <span class="text-red font-medium"><%= q.customer_name || '-' %></span>
+            <% if (q.owner_role) { %><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold align-middle <%= q.owner_role==='bayi'?'bg-blue-900/50 text-blue-400':q.owner_role==='servis'?'bg-green-900/50 text-green-400':'bg-yellow-900/50 text-yellow-400' %>"><%= roleLabel(q.owner_role) %></span><% } %>
+            <% if (q.customer_phone) { %><br><span class="text-muted text-xs"><%= q.customer_phone %></span><% } %>
+          </td>
           <td class="py-3 px-4 text-muted"><%= q.quote_date %></td>
           <td class="py-3 px-4 text-muted"><%= q.valid_until || '-' %></td>
           <td class="py-3 px-4 text-right font-bold"><%= q.subtotal ? money(q.subtotal) : '-' %></td>
