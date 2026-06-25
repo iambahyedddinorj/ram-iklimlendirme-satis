@@ -10,7 +10,7 @@
 <body class="bg-[#EEF3F9] text-slate-800 min-h-screen flex items-center justify-center p-4">
   <div class="w-full max-w-sm">
     <div class="text-center mb-6">
-      <img id="loginLogo" src="<%= (settings && settings.logo_bayi) || '/img/ram-logo.jpg' %>" alt="logo" class="w-48 mx-auto rounded-2xl shadow-md">
+      <img id="loginLogo" src="<%= logoFor('bayi') %>" alt="logo" class="w-48 mx-auto rounded-2xl shadow-md">
       <p class="text-slate-500 text-sm mt-3 tracking-[0.18em] font-semibold">SATIŞ TAKİP</p>
     </div>
 
@@ -40,9 +40,9 @@
 
 <script>
   var LOGOS = {
-    bayi: '<%= (settings && settings.logo_bayi) || "/img/ram-logo.jpg" %>',
-    servis: '<%= (settings && settings.logo_servis) || "/img/ram-logo.jpg" %>',
-    admin: '<%= (settings && settings.logo_admin) || "/img/ram-logo.jpg" %>'
+    bayi: '<%= logoFor("bayi") %>',
+    servis: '<%= logoFor("servis") %>',
+    admin: '<%= logoFor("admin") %>'
   };
   var COLORS = { bayi: '#2563EB', servis: '#16a34a', admin: '#b45309' };
   var tabs = document.querySelectorAll('.portal-tab');

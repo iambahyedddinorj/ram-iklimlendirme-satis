@@ -5,12 +5,12 @@
   <h2 class="text-red font-bold text-lg mb-1 flex items-center gap-2"><span class="material-symbols-outlined icon-fill">image</span> Logolar (Bayi / Servis / Yönetici)</h2>
   <p class="text-muted text-sm mb-5">Her giriş tipi için ayrı logo. Teklif çıktısında, teklifi <strong>kim oluşturduysa</strong> onun logosu görünür. İstediğin zaman değiştirebilirsin — logolar veritabanına kaydedilir, güncellemelerde silinmez. (PNG / JPG önerilir)</p>
   <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
-    <% const slots = [['logo_bayi','Bayi Logosu','text-blue-400'],['logo_servis','Servis Logosu','text-green-400'],['logo_admin','Yönetici Logosu','text-yellow-400']]; %>
-    <% slots.forEach(([key,label,cls]) => { %>
+    <% const slots = [['bayi','Bayi Logosu','text-blue-400'],['servis','Servis Logosu','text-green-400'],['admin','Yönetici Logosu','text-yellow-400']]; %>
+    <% slots.forEach(([role,label,cls]) => { %>
     <div class="border border-border rounded-lg p-4">
       <label class="block mb-2 font-bold <%= cls %>"><%= label %></label>
-      <img src="<%= settings[key] || '/img/ram-logo.jpg' %>" class="w-full h-28 object-contain bg-bg border border-border rounded-lg mb-3 p-2">
-      <input type="file" name="<%= key %>" accept="image/*" class="block w-full text-xs text-muted file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-red file:text-white file:font-bold file:cursor-pointer">
+      <img src="<%= logoFor(role) %>" class="w-full h-28 object-contain bg-bg border border-border rounded-lg mb-3 p-2">
+      <input type="file" name="logo_<%= role %>" accept="image/*" class="block w-full text-xs text-muted file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-red file:text-white file:font-bold file:cursor-pointer">
     </div>
     <% }) %>
   </div>

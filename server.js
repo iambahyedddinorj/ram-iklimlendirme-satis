@@ -180,11 +180,13 @@ function getSettings() {
 }
 
 // Role göre teklif logosu seç (bayi / servis / admin)
+const LOGO_VER = '20260625b'; // logo dosyası değişince artır → tarayıcı/CDN cache kırılır
 function logoForRole(role, s) {
   s = s || getSettings();
-  if (role === 'bayi') return s.logo_bayi || '/img/ram-logo.jpg';
-  if (role === 'servis') return s.logo_servis || '/img/ram-logo.jpg';
-  return s.logo_admin || '/img/ram-logo.jpg';
+  let v = role === 'bayi' ? s.logo_bayi : role === 'servis' ? s.logo_servis : s.logo_admin;
+  v = v || '/img/ram-logo.jpg';
+  if (v.startsWith('/img/') && v.indexOf('?') === -1) v += '?v=' + LOGO_VER;
+  return v;
 }
 function roleLabel(role) { return role === 'bayi' ? 'Bayi' : role === 'servis' ? 'Servis' : 'Yönetici'; }
 
