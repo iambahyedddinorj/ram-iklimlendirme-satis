@@ -438,7 +438,8 @@ app.post('/giris', (req, res) => {
   req.session.user = { id: user.id, name: user.name, username: user.username, role: user.role || 'admin' };
   res.redirect('/');
 });
-app.get('/cikis', (req, res) => { req.session.destroy(); res.redirect('/giris'); });
+app.get('/cikis', (req, res) => { req.session.destroy(() => res.redirect('/giris')); });
+app.post('/cikis', (req, res) => { req.session.destroy(() => res.redirect('/giris')); });
 
 // --- Dashboard ---
 app.get('/', auth, (req, res) => {
