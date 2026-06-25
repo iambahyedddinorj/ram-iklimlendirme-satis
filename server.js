@@ -1104,27 +1104,33 @@ app.post('/ayarlar/sifre', auth, (req, res) => {
   res.redirect('/ayarlar');
 });
 
-// --- Logo yükleme (Bayi / Servis / Yönetici) — sadece admin ---
-const PUB_IMG = path.join(__dirname, 'public', 'img');
-app.post('/ayarlar/logo', auth, adminOnly, upload.fields([{ name: 'logo_bayi', maxCount: 1 }, { name: 'logo_servis', maxCount: 1 }, { name: 'logo_admin', maxCount: 1 }]), (req, res) => {
+// --- Logo yükleme (Bayi / Servis / Yönetici) — sadece süper admin ---
+// Logolar veritabanına (data URI) kaydedilir → Hostinger'da yeniden dağıtımda silinmez, kalıcı.
+app.post('/hesaplar/logo', auth, adminOnly, upload.fields([{ name: 'logo_bayi', maxCount: 1 }, { name: 'logo_servis', maxCount: 1 }, { name: 'logo_admin', maxCount: 1 }]), (req, res) => {
   try {
-    if (!fs.existsSync(PUB_IMG)) fs.mkdirSync(PUB_IMG, { recursive: true });
     const saveLogo = (field) => {
       const f = req.files && req.files[field] && req.files[field][0];
       if (!f) return;
-      let ext = (path.extname(f.originalname) || '.png').toLowerCase();
-      if (!['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) ext = '.png';
-      const fname = field.replace('logo_', 'logo-') + ext; // logo-bayi.png
-      fs.copyFileSync(f.path, path.join(PUB_IMG, fname));
+      const buf = fs.readFileSync(f.path);
       try { fs.unlinkSync(f.path); } catch {}
-      q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', field, '/img/' + fname + '?v=' + Date.now());
+      const ext = (path.extname(f.originalname) || '').toLowerCase();
+      const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+      const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+      q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', field, dataUri);
     };
     saveLogo('logo_bayi'); saveLogo('logo_servis'); saveLogo('logo_admin');
     req.session.flash = { type: 'success', msg: 'Logolar güncellendi' };
   } catch (e) {
     req.session.flash = { type: 'error', msg: 'Logo yüklenemedi: ' + e.message };
   }
-  res.redirect('/ayarlar');
+  res.redirect('/hesaplar');
+});
+// Logoyu varsayılana döndür
+app.post('/hesaplar/logo/sil', auth, adminOnly, (req, res) => {
+  const field = ['logo_bayi', 'logo_servis', 'logo_admin'].includes(req.body.field) ? req.body.field : null;
+  if (field) q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', field, '/img/ram-logo.jpg');
+  req.session.flash = { type: 'success', msg: 'Logo varsayılana döndürüldü' };
+  res.redirect('/hesaplar');
 });
 
 // --- Hesap yönetimi (süper admin) ---
@@ -1184,17 +1190,19 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
 
   const { Document, Paragraph, Table, TableRow, TableCell, TextRun, WidthType, AlignmentType, BorderStyle, HeadingLevel, ShadingType, ImageRun } = docx;
 
-  // Role göre logo (bayi/servis/admin) — varsa Word başına resim ekle
+  // Role göre logo (bayi/servis/admin) — varsa Word başına resim ekle (data URI veya dosya)
   let logoParas = [];
   try {
-    const lp = logoForRole(quote.owner_role, settings).split('?')[0];
-    const abs = path.join(__dirname, 'public', lp.replace(/^\//, ''));
-    if (fs.existsSync(abs)) {
-      const ext = path.extname(abs).slice(1).toLowerCase();
-      const okTypes = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' };
-      const t = okTypes[ext];
-      if (t) logoParas = [new Paragraph({ children: [new ImageRun({ type: t, data: fs.readFileSync(abs), transformation: { width: 150, height: 90 }, altText: { title: 'Logo', description: 'Logo', name: 'Logo' } })], spacing: { after: 120 } })];
+    const lp = logoForRole(quote.owner_role, settings);
+    let buf = null, t = null;
+    if (lp.startsWith('data:')) {
+      const m = lp.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.*)$/);
+      if (m) { const map = { png: 'png', jpeg: 'jpg', jpg: 'jpg', gif: 'gif' }; t = map[m[1]]; if (t) buf = Buffer.from(m[2], 'base64'); }
+    } else {
+      const abs = path.join(__dirname, 'public', lp.split('?')[0].replace(/^\//, ''));
+      if (fs.existsSync(abs)) { const ext = path.extname(abs).slice(1).toLowerCase(); const ok = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' }; t = ok[ext]; if (t) buf = fs.readFileSync(abs); }
     }
+    if (buf && t) logoParas = [new Paragraph({ children: [new ImageRun({ type: t, data: buf, transformation: { width: 150, height: 90 }, altText: { title: 'Logo', description: 'Logo', name: 'Logo' } })], spacing: { after: 120 } })];
   } catch {}
 
   const redColor = '2563EB';

@@ -70,32 +70,10 @@
 </form>
 
 <% if (user.role==='admin') { %>
-<form method="POST" action="/ayarlar/logo" enctype="multipart/form-data" class="max-w-2xl mt-8">
-  <div class="bg-surface border border-border rounded-xl p-6">
-    <h2 class="text-red font-bold text-lg mb-1 flex items-center gap-2"><span class="material-symbols-outlined icon-fill">image</span> Logolar (Bayi / Servis)</h2>
-    <p class="text-muted text-sm mb-4">Her giriş tipi için ayrı logo. Teklif çıktısında, teklifi <strong>kim oluşturduysa</strong> onun logosu görünür. (PNG / JPG)</p>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-      <div>
-        <label class="text-muted text-sm block mb-2 font-bold text-blue-400">Bayi Logosu</label>
-        <img src="<%= settings.logo_bayi || '/img/ram-logo.jpg' %>" class="w-full h-24 object-contain bg-bg border border-border rounded-lg mb-2 p-2">
-        <input type="file" name="logo_bayi" accept="image/*" class="block w-full text-xs text-muted file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-red file:text-white file:font-bold file:cursor-pointer">
-      </div>
-      <div>
-        <label class="text-muted text-sm block mb-2 font-bold text-green-400">Servis Logosu</label>
-        <img src="<%= settings.logo_servis || '/img/ram-logo.jpg' %>" class="w-full h-24 object-contain bg-bg border border-border rounded-lg mb-2 p-2">
-        <input type="file" name="logo_servis" accept="image/*" class="block w-full text-xs text-muted file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-red file:text-white file:font-bold file:cursor-pointer">
-      </div>
-      <div>
-        <label class="text-muted text-sm block mb-2 font-bold text-yellow-400">Yönetici Logosu</label>
-        <img src="<%= settings.logo_admin || '/img/ram-logo.jpg' %>" class="w-full h-24 object-contain bg-bg border border-border rounded-lg mb-2 p-2">
-        <input type="file" name="logo_admin" accept="image/*" class="block w-full text-xs text-muted file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-red file:text-white file:font-bold file:cursor-pointer">
-      </div>
-    </div>
-    <button type="submit" class="mt-5 bg-red hover:bg-redDark text-white font-bold px-8 py-3 rounded-lg flex items-center gap-2">
-      <span class="material-symbols-outlined text-[20px]">upload</span> Logoları Yükle
-    </button>
-  </div>
-</form>
+<div class="max-w-2xl mt-8 bg-surface border border-border rounded-xl p-6">
+  <h2 class="text-red font-bold text-lg mb-1 flex items-center gap-2"><span class="material-symbols-outlined icon-fill">image</span> Logolar</h2>
+  <p class="text-muted text-sm">Bayi / Servis / Yönetici logolarını <a href="/hesaplar" class="text-red font-bold underline">Hesaplar (Süper Admin)</a> sayfasından istediğin zaman yükleyebilirsin.</p>
+</div>
 <% } %>
 
 <script>
