@@ -7,6 +7,7 @@ const fs = require('fs');
 const ExcelJS = require('exceljs');
 const docx = require('docx');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
 
 const DB_DIR = path.join(require('os').homedir(), '.ram-iklimlendirme');
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
@@ -340,10 +341,13 @@ async function writeBackupSet(dir, stamp, jsonStr, xlsxBuf, pdfBuf) {
   cleanupBackups(dir);
   return done;
 }
+// Sunucuda kalıcı yedek klasörü (Hostinger'da redeploy'da silinmez — veri klasörünün içinde)
+const SERVER_BACKUP_DIR = path.join(DB_DIR, 'auto-backups');
 async function runFolderBackup() {
   const s = getSettings();
-  const dirs = [s.backup_folder, s.backup_folder2].map(d => (d || '').trim()).filter(Boolean);
-  if (!dirs.length) return { ok: false, error: 'Yedek klasörü ayarlanmamış' };
+  // Her zaman kalıcı sunucu klasörü + (varsa) kullanıcının verdiği D:/Drive klasörleri
+  const dirs = [SERVER_BACKUP_DIR];
+  for (const extra of [s.backup_folder, s.backup_folder2]) { const d = (extra || '').trim(); if (d) dirs.push(d); }
   const stamp = dateStamp();
   const jsonStr = JSON.stringify(exportData(), null, 2);
   let xlsxBuf = null, pdfBuf = null;
@@ -352,6 +356,37 @@ async function runFolderBackup() {
   let formats = [];
   for (const d of dirs) { try { formats = await writeBackupSet(d, stamp, jsonStr, xlsxBuf, pdfBuf); } catch {} }
   return { ok: formats.length > 0, formats, dirs, error: formats.length ? null : 'Hiçbir format yazılamadı' };
+}
+
+// --- E-posta ile yedek (Hostinger'da da çalışır, veriyi sunucu dışına çıkarır) ---
+function smtpConfig() {
+  const s = getSettings();
+  const user = process.env.SMTP_USER || s.smtp_user;
+  const pass = (process.env.SMTP_PASS || s.smtp_pass || '').replace(/\s+/g, ''); // app password boşluksuz
+  const to = process.env.BACKUP_EMAIL || s.backup_email || user;
+  if (!user || !pass) return null;
+  return { user, pass, to };
+}
+function emailBackupEnabled() { return !!smtpConfig(); }
+async function sendBackupEmail() {
+  const cfg = smtpConfig();
+  if (!cfg) return { ok: false, error: 'E-posta/şifre ayarlı değil' };
+  try {
+    const transporter = nodemailer.createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, auth: { user: cfg.user, pass: cfg.pass } });
+    const stamp = dateStamp();
+    const jsonStr = JSON.stringify(exportData(), null, 2);
+    let xlsxBuf = null; try { xlsxBuf = await buildExcel(); } catch {}
+    const att = [{ filename: `yedek-${stamp}.json`, content: jsonStr }];
+    if (xlsxBuf) att.push({ filename: `yedek-${stamp}.xlsx`, content: xlsxBuf });
+    const company = getSettings().company_name || 'Ram İklimlendirme';
+    await transporter.sendMail({
+      from: `"${company} Yedek" <${cfg.user}>`, to: cfg.to,
+      subject: `${company} — Otomatik Yedek (${stamp})`,
+      text: `${company} otomatik veritabanı yedeği ektedir.\nTarih: ${trNow().toLocaleString('tr-TR')}\n\nGeri yüklemek için: uygulamada Yedekleme > Yedeği Geri Yükle bölümünden ekteki JSON dosyasını yükleyin.`,
+      attachments: att,
+    });
+    return { ok: true, to: cfg.to };
+  } catch (e) { console.log('E-posta yedek hatası:', e.message); return { ok: false, error: e.message }; }
 }
 
 // Multer for file uploads
@@ -1075,6 +1110,22 @@ app.post('/yedek/ayar', auth, (req, res) => {
   req.session.flash = { type: 'success', msg: 'Yedek ayarları kaydedildi' };
   res.redirect('/yedek');
 });
+// E-posta yedek ayarı (Gmail + uygulama şifresi) — süper admin
+app.post('/yedek/eposta-ayar', auth, adminOnly, (req, res) => {
+  const set = (k, v) => q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, v);
+  if (req.body.smtp_user !== undefined) set('smtp_user', (req.body.smtp_user || '').trim());
+  if (req.body.smtp_pass) set('smtp_pass', (req.body.smtp_pass || '').replace(/\s+/g, '')); // boş gelirse mevcut korunur
+  if (req.body.backup_email !== undefined) set('backup_email', (req.body.backup_email || '').trim());
+  req.session.flash = { type: 'success', msg: 'E-posta yedek ayarı kaydedildi' };
+  res.redirect('/yedek');
+});
+app.post('/yedek/eposta-test', auth, adminOnly, async (req, res) => {
+  const r = await sendBackupEmail();
+  req.session.flash = r.ok
+    ? { type: 'success', msg: 'Test yedeği gönderildi → ' + r.to + ' (gelen kutunu kontrol et)' }
+    : { type: 'error', msg: 'E-posta gönderilemedi: ' + (r.error || 'ayarları kontrol et') };
+  res.redirect('/yedek');
+});
 
 // --- Ayarlar ---
 app.get('/ayarlar', auth, (req, res) => {
@@ -1309,12 +1360,18 @@ function scheduledTargetDay(now) {
 async function autoBackupTick() {
   try {
     const s = getSettings();
-    if (s.backup_auto !== '1') return;
-    if (!s.backup_folder && !s.backup_folder2) return;
     const target = scheduledTargetDay(trNow());
-    if ((s.backup_last_date || '') >= target) return; // bu slot için zaten alınmış
-    const r = await runFolderBackup();
-    if (r.ok) q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', 'backup_last_date', target);
+    const setDate = (k, v) => q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, v);
+    // 1) Klasör yedeği (her zaman kalıcı sunucu klasörüne + varsa D:/Drive)
+    if ((s.backup_last_date || '') < target) {
+      const r = await runFolderBackup();
+      if (r.ok) setDate('backup_last_date', target);
+    }
+    // 2) E-posta yedeği (yapılandırılmışsa) — veriyi sunucu dışına çıkarır
+    if (emailBackupEnabled() && (s.backup_last_email_date || '') < target) {
+      const r = await sendBackupEmail();
+      if (r.ok) setDate('backup_last_email_date', target);
+    }
   } catch {}
 }
 setTimeout(autoBackupTick, 15 * 1000);        // açılışta kaçan yedeği yakala
