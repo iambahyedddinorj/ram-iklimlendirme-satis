@@ -184,6 +184,28 @@ function getSettings() {
 
 // Role göre teklif logosu seç (bayi / servis / admin)
 const LOGO_VER = '20260625b'; // logo dosyası değişince artır → tarayıcı/CDN cache kırılır
+// ── Role göre firma kimliği ──────────────────────────────────────
+// Teklif çıktısındaki başlık, adres, telefon gibi bilgiler bayi ve servis
+// için ayrı tutuluyor. Logo zaten role göreydi; bunlar da öyle olsun diye
+// role ekli anahtarlarda saklanıyor (company_name_bayi gibi).
+// Yönetici düz anahtarı kullanıyor: eski kayıtlar olduğu yerde kalıyor ve
+// bayi/servis kendi değerini girmediyse ona düşüyor.
+const ROL_AYARLARI = ['company_name', 'company_subtitle', 'owner_name', 'address', 'phone', 'website', 'tax_id'];
+const rolAnahtari = (k, role) => (role === 'bayi' || role === 'servis') ? k + '_' + role : k;
+
+// Verilen rolün gördüğü ayar kümesi: kendi değeri varsa o, yoksa ortak değer.
+function settingsForRole(role, s) {
+  s = s || getSettings();
+  const c = Object.assign({}, s);
+  if (role === 'bayi' || role === 'servis') {
+    for (const k of ROL_AYARLARI) {
+      const v = s[k + '_' + role];
+      if (v !== undefined && v !== '') c[k] = v;
+    }
+  }
+  return c;
+}
+
 function logoForRole(role, s) {
   s = s || getSettings();
   let v = role === 'bayi' ? s.logo_bayi : role === 'servis' ? s.logo_servis : s.logo_admin;
@@ -912,7 +934,8 @@ app.get('/teklif/:id/editor', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const settings = getSettings();
+  // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
+  const settings = settingsForRole(quote.owner_role);
   const printLogo = logoForRole(quote.owner_role, settings);
   res.render('quote-editor', { quote, items, settings, printLogo, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, layout: false });
 });
@@ -936,8 +959,14 @@ app.post('/api/teklif/kaydet', auth, (req, res) => {
     }
 
     if (s) {
+      // Düzenleyicide başlık/adres değiştirilirse teklifin sahibi olan rolün
+      // ayarına yazılıyor; başka rolün bilgisi ezilmesin diye.
+      const sahip = q.get('SELECT owner_role FROM quotes WHERE id=?', id);
+      const rol = sahip ? sahip.owner_role : null;
       for (const [k, v] of Object.entries(s)) {
-        if (v !== undefined) q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, v);
+        if (v === undefined) continue;
+        const anahtar = ROL_AYARLARI.includes(k) ? rolAnahtari(k, rol) : k;
+        q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', anahtar, v);
       }
     }
 
@@ -960,7 +989,8 @@ app.get('/teklif/:id/yazdir', auth, (req, res) => {
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const gruplar = paraGruplari(items, quote);
-  const settings = getSettings();
+  // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
+  const settings = settingsForRole(quote.owner_role);
   const printLogo = logoForRole(quote.owner_role, settings);
   res.render('quote-print', { quote, items, gruplar, paraSimge, paraYaz, settings, printLogo, layout: false });
 });
@@ -971,7 +1001,8 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const gruplar = paraGruplari(items, quote);
 
-  const settings = getSettings();
+  // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
+  const settings = settingsForRole(quote.owner_role);
   const wb = new ExcelJS.Workbook();
   wb.creator = settings.company_name || 'Ram İklimlendirme';
   const ws = wb.addWorksheet('Teklif');
@@ -1305,14 +1336,18 @@ app.post('/yedek/eposta-test', auth, adminOnly, async (req, res) => {
 
 // --- Ayarlar ---
 app.get('/ayarlar', auth, (req, res) => {
-  const settings = getSettings();
+  // Herkes kendi rolünün firma bilgilerini görüp düzenliyor.
+  const settings = settingsForRole(req.session.user.role);
   res.render('settings', { settings, page: 'settings', title: 'Firma Ayarları' });
 });
 
 app.post('/ayarlar', auth, (req, res) => {
+  const rol = req.session.user.role;
   const keys = ['company_name', 'company_subtitle', 'owner_name', 'address', 'phone', 'website', 'tax_id', 'default_tax_rate', 'default_valid_days', 'products'];
   keys.forEach(k => {
-    q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, req.body[k] || '');
+    // Firma kimliği role göre ayrı; sayaç/ürün gibi işletme ayarları ortak.
+    const anahtar = ROL_AYARLARI.includes(k) ? rolAnahtari(k, rol) : k;
+    q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', anahtar, req.body[k] || '');
   });
   req.session.flash = { type: 'success', msg: 'Ayarlar kaydedildi' };
   res.redirect('/ayarlar');
@@ -1418,7 +1453,8 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const settings = getSettings();
+  // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
+  const settings = settingsForRole(quote.owner_role);
   const gruplar = paraGruplari(items, quote);
   const money = (n, kod) => paraYaz(n, kod);
 
