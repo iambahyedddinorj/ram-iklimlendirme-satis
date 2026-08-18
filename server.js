@@ -194,6 +194,26 @@ const ROL_AYARLARI = ['company_name', 'company_subtitle', 'owner_name', 'address
 const rolAnahtari = (k, role) => (role === 'bayi' || role === 'servis') ? k + '_' + role : k;
 
 // Verilen rolün gördüğü ayar kümesi: kendi değeri varsa o, yoksa ortak değer.
+// ── Rol ayrımı ───────────────────────────────────────────────────
+// Bayi ve servis yalnızca kendi kayıtlarını görüyor; yönetici hepsini.
+// owner_role'ü boş olan eski kayıtlar yalnızca yöneticide görünüyor.
+const AYRI_ROLLER = ['bayi', 'servis'];
+function kendiRolu(req) {
+  const r = req.session.user && req.session.user.role;
+  return AYRI_ROLLER.includes(r) ? r : null; // null = yönetici, sınır yok
+}
+// Sorguya eklenecek koşul: yönetici için boş döner.
+function rolKosulu(req, baglac, alan) {
+  const r = kendiRolu(req);
+  if (!r) return { sql: '', p: [] };
+  return { sql: ' ' + (baglac || 'WHERE') + ' ' + (alan || 'owner_role') + ' = ?', p: [r] };
+}
+// Tek kayda erişim: başka rolün kaydına girilemiyor.
+function erisimVar(req, kayit) {
+  const r = kendiRolu(req);
+  return !r || (!!kayit && kayit.owner_role === r);
+}
+
 function settingsForRole(role, s) {
   s = s || getSettings();
   const c = Object.assign({}, s);
@@ -604,24 +624,27 @@ app.post('/cikis', (req, res) => { req.session.destroy(() => res.redirect('/giri
 
 // --- Dashboard ---
 app.get('/', auth, (req, res) => {
-  const totalCustomers = q.get('SELECT COUNT(*) c FROM customers').c;
-  const totalSales = q.get('SELECT COUNT(*) c FROM sales').c;
-  const totalRevenue = q.get('SELECT COALESCE(SUM(price),0) s FROM sales').s;
+  const rk = rolKosulu(req, 'AND');
+  const rks = rolKosulu(req, 'AND', 's.owner_role');
+  const totalCustomers = q.get('SELECT COUNT(*) c FROM customers WHERE 1=1' + rk.sql, ...rk.p).c;
+  const totalSales = q.get('SELECT COUNT(*) c FROM sales WHERE 1=1' + rk.sql, ...rk.p).c;
+  const totalRevenue = q.get('SELECT COALESCE(SUM(price),0) s FROM sales WHERE 1=1' + rk.sql, ...rk.p).s;
   const recentSales = q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone
-    FROM sales s JOIN customers c ON s.customer_id=c.id ORDER BY s.created_at DESC LIMIT 10`);
+    FROM sales s JOIN customers c ON s.customer_id=c.id WHERE 1=1` + rks.sql + ` ORDER BY s.created_at DESC LIMIT 10`, ...rks.p);
   const monthlySales = q.all(`SELECT strftime('%Y-%m', sale_date) m, COUNT(*) c, SUM(price) s
-    FROM sales GROUP BY m ORDER BY m DESC LIMIT 6`);
-  const totalDebt = totalRevenue - q.get('SELECT COALESCE(SUM(paid_amount),0) s FROM sales').s;
-  const lowStockCount = q.all('SELECT id FROM stock WHERE quantity <= min_quantity').length;
+    FROM sales WHERE 1=1` + rk.sql + ` GROUP BY m ORDER BY m DESC LIMIT 6`, ...rk.p);
+  const totalDebt = totalRevenue - q.get('SELECT COALESCE(SUM(paid_amount),0) s FROM sales WHERE 1=1' + rk.sql, ...rk.p).s;
+  const lowStockCount = q.all('SELECT id FROM stock WHERE quantity <= min_quantity' + rk.sql, ...rk.p).length;
   res.render('dashboard', { totalCustomers, totalSales, totalRevenue, totalDebt, lowStockCount, recentSales, monthlySales: monthlySales.reverse() });
 });
 
 // --- Müşteriler ---
 app.get('/musteriler', auth, (req, res) => {
   const search = req.query.q || '';
+  const rk = rolKosulu(req, 'AND');
   const customers = search
-    ? q.all("SELECT * FROM customers WHERE name LIKE ? OR phone LIKE ? ORDER BY name", '%'+search+'%', '%'+search+'%')
-    : q.all('SELECT * FROM customers ORDER BY created_at DESC');
+    ? q.all("SELECT * FROM customers WHERE (name LIKE ? OR phone LIKE ?)" + rk.sql + " ORDER BY name", '%'+search+'%', '%'+search+'%', ...rk.p)
+    : q.all('SELECT * FROM customers WHERE 1=1' + rk.sql + ' ORDER BY created_at DESC', ...rk.p);
   res.render('customers', { customers, search });
 });
 
@@ -636,6 +659,8 @@ app.post('/musteri/kaydet', auth, (req, res) => {
     return res.redirect(id ? '/musteri/duzenle/' + id : '/musteri/yeni');
   }
   if (id) {
+    const mevcut = q.get('SELECT owner_role FROM customers WHERE id=?', id);
+    if (!erisimVar(req, mevcut)) return res.redirect('/musteriler');
     q.run('UPDATE customers SET name=?,phone=?,email=?,address=?,city=?,notes=? WHERE id=?', name, phone, email, address, city, notes, id);
     req.session.flash = { type: 'success', msg: 'Müşteri güncellendi' };
     return res.redirect('/musteri/' + id);
@@ -648,6 +673,8 @@ app.post('/musteri/kaydet', auth, (req, res) => {
 app.get('/musteri/:id', auth, (req, res) => {
   const customer = q.get('SELECT * FROM customers WHERE id=?', req.params.id);
   if (!customer) return res.redirect('/musteriler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, customer)) return res.redirect('/musteriler');
   const sales = q.all('SELECT * FROM sales WHERE customer_id=? ORDER BY sale_date DESC', customer.id);
   res.render('customer-detail', { customer, sales });
 });
@@ -655,11 +682,15 @@ app.get('/musteri/:id', auth, (req, res) => {
 app.get('/musteri/duzenle/:id', auth, (req, res) => {
   const customer = q.get('SELECT * FROM customers WHERE id=?', req.params.id);
   if (!customer) return res.redirect('/musteriler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, customer)) return res.redirect('/musteriler');
   res.render('customer-form', { customer });
 });
 
 app.post('/musteri/sil', auth, (req, res) => {
   const id = req.body.id;
+  const kayit = q.get('SELECT owner_role FROM customers WHERE id=?', id);
+  if (!erisimVar(req, kayit)) return res.redirect('/musteriler');
   // Teklifler müşteriye yabancı anahtarla bağlı. Eskiden önce satışlar
   // siliniyor, sonra müşteri silme yabancı anahtar hatasıyla patlıyordu:
   // satışlar gitmiş, müşteri duruyordu. Artık önce kontrol ediliyor ve
@@ -686,16 +717,17 @@ app.post('/musteri/sil', auth, (req, res) => {
 // --- Satışlar ---
 app.get('/satislar', auth, (req, res) => {
   const search = req.query.q || '';
+  const rk = rolKosulu(req, 'AND', 's.owner_role');
   const sales = search
     ? q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone FROM sales s JOIN customers c ON s.customer_id=c.id
-        WHERE c.name LIKE ? OR s.ic_unite_seri LIKE ? OR s.dis_unite_seri LIKE ? OR s.product_name LIKE ?
-        ORDER BY s.sale_date DESC`, '%'+search+'%', '%'+search+'%', '%'+search+'%', '%'+search+'%')
-    : q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone FROM sales s JOIN customers c ON s.customer_id=c.id ORDER BY s.sale_date DESC`);
+        WHERE (c.name LIKE ? OR s.ic_unite_seri LIKE ? OR s.dis_unite_seri LIKE ? OR s.product_name LIKE ?)` + rk.sql + `
+        ORDER BY s.sale_date DESC`, '%'+search+'%', '%'+search+'%', '%'+search+'%', '%'+search+'%', ...rk.p)
+    : q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone FROM sales s JOIN customers c ON s.customer_id=c.id WHERE 1=1` + rk.sql + ` ORDER BY s.sale_date DESC`, ...rk.p);
   res.render('sales', { sales, search });
 });
 
 app.get('/satis/yeni', auth, (req, res) => {
-  const customers = q.all('SELECT id,name,phone FROM customers ORDER BY name');
+  const customers = q.all('SELECT id,name,phone FROM customers WHERE 1=1' + rolKosulu(req, 'AND').sql + ' ORDER BY name', ...rolKosulu(req, 'AND').p);
   res.render('sale-form', { sale: null, customers, preselect: req.query.musteri || '' });
 });
 
@@ -712,6 +744,10 @@ app.post('/satis/kaydet', auth, (req, res) => {
   if (!product_name.trim() || !customer_id) {
     req.session.flash = { type: 'error', msg: 'Müşteri ve ürün adı zorunlu' };
     return res.redirect(id ? '/satis/duzenle/' + id : '/satis/yeni');
+  }
+  if (id) {
+    const mevcut = q.get('SELECT owner_role FROM sales WHERE id=?', id);
+    if (!erisimVar(req, mevcut)) return res.redirect('/satislar');
   }
   const paid = gMetin(req.body.paid_amount) !== '' ? gSayi(req.body.paid_amount) : price;
   const status = gMetin(req.body.payment_status) || (paid >= price ? 'Ödendi' : 'Kısmi Ödeme');
@@ -745,11 +781,16 @@ app.get('/satis/:id', auth, (req, res) => {
 app.get('/satis/duzenle/:id', auth, (req, res) => {
   const sale = q.get('SELECT * FROM sales WHERE id=?', req.params.id);
   if (!sale) return res.redirect('/satislar');
-  const customers = q.all('SELECT id,name,phone FROM customers ORDER BY name');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, sale)) return res.redirect('/satislar');
+  const customers = q.all('SELECT id,name,phone FROM customers WHERE 1=1' + rolKosulu(req, 'AND').sql + ' ORDER BY name', ...rolKosulu(req, 'AND').p);
   res.render('sale-form', { sale, customers, preselect: '' });
 });
 
 app.post('/satis/sil', auth, (req, res) => {
+  // Başka rolün kaydı silinemesin.
+  const kayit = q.get('SELECT owner_role FROM sales WHERE id=?', req.body.id);
+  if (!erisimVar(req, kayit)) return res.redirect('/satislar');
   q.run('DELETE FROM sales WHERE id=?', req.body.id);
   req.session.flash = { type: 'success', msg: 'Satış silindi' };
   res.redirect('/satislar');
@@ -760,7 +801,8 @@ app.post('/odeme/kaydet', auth, (req, res) => {
   const sale_id = req.body.sale_id;
   // Satış başka bir sekmede silinmiş olabilir; yoksa eskiden sale.price
   // okunurken çöküyordu.
-  const sale = q.get('SELECT price, paid_amount FROM sales WHERE id=?', sale_id);
+  const sale = q.get('SELECT price, paid_amount, owner_role FROM sales WHERE id=?', sale_id);
+  if (sale && !erisimVar(req, sale)) return res.redirect('/satislar');
   if (!sale) {
     req.session.flash = { type: 'error', msg: 'Satış bulunamadı' };
     return res.redirect('/satislar');
@@ -790,7 +832,8 @@ app.post('/odeme/kaydet', auth, (req, res) => {
 
 // --- Teklifler ---
 app.get('/teklifler', auth, (req, res) => {
-  const quotes = q.all('SELECT * FROM quotes ORDER BY created_at DESC');
+  const rk = rolKosulu(req, 'AND');
+  const quotes = q.all('SELECT * FROM quotes WHERE 1=1' + rk.sql + ' ORDER BY created_at DESC', ...rk.p);
   // Listede tek toplam gösterilemiyor: bir teklifte birden çok para birimi olabilir.
   for (const t of quotes) {
     t.gruplar = paraGruplari(q.all('SELECT * FROM quote_items WHERE quote_id=?', t.id), t);
@@ -799,15 +842,17 @@ app.get('/teklifler', auth, (req, res) => {
 });
 
 app.get('/teklif/yeni', auth, (req, res) => {
-  const customers = q.all('SELECT id,name,phone,address,city FROM customers ORDER BY name');
+  const customers = q.all('SELECT id,name,phone,address,city FROM customers WHERE 1=1' + rolKosulu(req, 'AND').sql + ' ORDER BY name', ...rolKosulu(req, 'AND').p);
   res.render('quote-form', { quote: null, items: [], customers, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, page: 'quotes', title: 'Yeni Teklif' });
 });
 
 app.get('/teklif/duzenle/:id', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const customers = q.all('SELECT id,name,phone,address,city FROM customers ORDER BY name');
+  const customers = q.all('SELECT id,name,phone,address,city FROM customers WHERE 1=1' + rolKosulu(req, 'AND').sql + ' ORDER BY name', ...rolKosulu(req, 'AND').p);
   res.render('quote-form', { quote, items, customers, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, page: 'quotes', title: 'Teklif Düzenle' });
 });
 
@@ -901,6 +946,10 @@ app.post('/teklif/kaydet', auth, (req, res) => {
   const prices = raw('item_price');
   const curs = raw('item_currency');
 
+  if (id) {
+    const mevcut = q.get('SELECT owner_role FROM quotes WHERE id=?', id);
+    if (!erisimVar(req, mevcut)) return res.redirect('/teklifler');
+  }
   let cName = customer_name, cPhone = customer_phone, cAddr = customer_address;
   if (customer_id) {
     const c = q.get('SELECT * FROM customers WHERE id=?', customer_id);
@@ -933,6 +982,8 @@ app.post('/teklif/kaydet', auth, (req, res) => {
 app.get('/teklif/:id/editor', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
   const settings = settingsForRole(quote.owner_role);
@@ -945,6 +996,8 @@ app.post('/api/teklif/kaydet', auth, (req, res) => {
   try {
     const { id, customer_name, customer_phone, customer_address, quote_date, valid_until, status, discount_type, discount_value, tax_rate, notes, items, settings: s } = req.body;
     if (!id) return res.json({ ok: false, msg: 'ID gerekli' });
+    const mevcutTeklif = q.get('SELECT owner_role FROM quotes WHERE id=?', id);
+    if (!erisimVar(req, mevcutTeklif)) return res.json({ ok: false, msg: 'Bu teklife erişiminiz yok' });
 
     q.run('UPDATE quotes SET customer_name=?,customer_phone=?,customer_address=?,quote_date=?,valid_until=?,status=?,discount_type=?,discount_value=?,discount_currency=?,tax_rate=?,notes=? WHERE id=?',
       customer_name || '', customer_phone || '', customer_address || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, paraKodu(req.body.discount_currency), Number(tax_rate) || 20, notes || '', id);
@@ -979,6 +1032,8 @@ app.post('/api/teklif/kaydet', auth, (req, res) => {
 app.get('/teklif/:id', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const gruplar = paraGruplari(items, quote);
   res.render('quote-detail', { quote, items, gruplar, paraSimge, paraYaz, page: 'quotes', title: 'Teklif #' + quote.id });
@@ -987,6 +1042,8 @@ app.get('/teklif/:id', auth, (req, res) => {
 app.get('/teklif/:id/yazdir', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const gruplar = paraGruplari(items, quote);
   // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
@@ -998,6 +1055,8 @@ app.get('/teklif/:id/yazdir', auth, (req, res) => {
 app.get('/teklif/:id/excel', auth, async (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const gruplar = paraGruplari(items, quote);
 
@@ -1167,6 +1226,8 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
 });
 
 app.post('/teklif/sil', auth, (req, res) => {
+  const kayit = q.get('SELECT owner_role FROM quotes WHERE id=?', req.body.id);
+  if (!erisimVar(req, kayit)) return res.redirect('/teklifler');
   q.run('DELETE FROM quote_items WHERE quote_id=?', req.body.id);
   q.run('DELETE FROM quotes WHERE id=?', req.body.id);
   req.session.flash = { type: 'success', msg: 'Teklif silindi' };
@@ -1175,9 +1236,11 @@ app.post('/teklif/sil', auth, (req, res) => {
 
 // --- Stok ---
 app.get('/stok', auth, (req, res) => {
-  const items = q.all('SELECT * FROM stock ORDER BY product_name');
+  const rk = rolKosulu(req, 'AND');
+  const items = q.all('SELECT * FROM stock WHERE 1=1' + rk.sql + ' ORDER BY product_name', ...rk.p);
   const lowStock = items.filter(i => i.quantity <= i.min_quantity);
-  const movements = q.all(`SELECT sm.*, s.product_name FROM stock_movements sm JOIN stock s ON sm.stock_id=s.id ORDER BY sm.created_at DESC LIMIT 50`);
+  const rkm = rolKosulu(req, 'AND', 's.owner_role');
+  const movements = q.all(`SELECT sm.*, s.product_name FROM stock_movements sm JOIN stock s ON sm.stock_id=s.id WHERE 1=1` + rkm.sql + ` ORDER BY sm.created_at DESC LIMIT 50`, ...rkm.p);
   res.render('stock', { items, lowStock, movements, page: 'stock', title: 'Stok Yönetimi' });
 });
 
@@ -1192,6 +1255,10 @@ app.post('/stok/kaydet', auth, (req, res) => {
   if (!product_name.trim()) {
     req.session.flash = { type: 'error', msg: 'Ürün adı zorunlu' };
     return res.redirect('/stok');
+  }
+  if (id) {
+    const mevcut = q.get('SELECT owner_role FROM stock WHERE id=?', id);
+    if (!erisimVar(req, mevcut)) return res.redirect('/stok');
   }
   if (id) {
     q.run('UPDATE stock SET product_name=?,sku=?,quantity=?,min_quantity=?,unit_cost=?,category=? WHERE id=?', product_name, sku, quantity, min_quantity, unit_cost, category, id);
@@ -1209,6 +1276,7 @@ app.post('/stok/hareket', auth, (req, res) => {
   const qty = Number(quantity);
   const item = q.get('SELECT * FROM stock WHERE id=?', stock_id);
   if (!item) return res.redirect('/stok');
+  if (!erisimVar(req, item)) return res.redirect('/stok');
   const newQty = type === 'giris' ? item.quantity + qty : Math.max(0, item.quantity - qty);
   q.run('UPDATE stock SET quantity=? WHERE id=?', newQty, stock_id);
   q.run('INSERT INTO stock_movements(stock_id,type,quantity,note,user_name) VALUES(?,?,?,?,?)', stock_id, type, qty, note, req.session.user.name);
@@ -1217,6 +1285,8 @@ app.post('/stok/hareket', auth, (req, res) => {
 });
 
 app.post('/stok/sil', auth, (req, res) => {
+  const kayit = q.get('SELECT owner_role FROM stock WHERE id=?', req.body.id);
+  if (!erisimVar(req, kayit)) return res.redirect('/stok');
   q.run('DELETE FROM stock_movements WHERE stock_id=?', req.body.id);
   q.run('DELETE FROM stock WHERE id=?', req.body.id);
   req.session.flash = { type: 'success', msg: 'Stok silindi' };
@@ -1226,26 +1296,29 @@ app.post('/stok/sil', auth, (req, res) => {
 // --- Raporlar ---
 app.get('/raporlar', auth, (req, res) => {
   const period = req.query.period || 'month';
-  const monthlySales = q.all(`SELECT strftime('%Y-%m', sale_date) m, COUNT(*) c, SUM(price) total, SUM(paid_amount) paid FROM sales GROUP BY m ORDER BY m DESC LIMIT 12`);
-  const topProducts = q.all(`SELECT product_name, COUNT(*) c, SUM(price) total FROM sales GROUP BY product_name ORDER BY c DESC LIMIT 10`);
-  const topCustomers = q.all(`SELECT c.name, c.phone, COUNT(s.id) sale_count, SUM(s.price) total, SUM(s.price - s.paid_amount) debt FROM sales s JOIN customers c ON s.customer_id=c.id GROUP BY s.customer_id ORDER BY total DESC LIMIT 10`);
-  const totalRevenue = q.get('SELECT COALESCE(SUM(price),0) s FROM sales').s;
-  const totalCollected = q.get('SELECT COALESCE(SUM(paid_amount),0) s FROM sales').s;
+  const rk = rolKosulu(req, 'AND');
+  const rks = rolKosulu(req, 'AND', 's.owner_role');
+  const monthlySales = q.all(`SELECT strftime('%Y-%m', sale_date) m, COUNT(*) c, SUM(price) total, SUM(paid_amount) paid FROM sales WHERE 1=1` + rk.sql + ` GROUP BY m ORDER BY m DESC LIMIT 12`, ...rk.p);
+  const topProducts = q.all(`SELECT product_name, COUNT(*) c, SUM(price) total FROM sales WHERE 1=1` + rk.sql + ` GROUP BY product_name ORDER BY c DESC LIMIT 10`, ...rk.p);
+  const topCustomers = q.all(`SELECT c.name, c.phone, COUNT(s.id) sale_count, SUM(s.price) total, SUM(s.price - s.paid_amount) debt FROM sales s JOIN customers c ON s.customer_id=c.id WHERE 1=1` + rks.sql + ` GROUP BY s.customer_id ORDER BY total DESC LIMIT 10`, ...rks.p);
+  const totalRevenue = q.get('SELECT COALESCE(SUM(price),0) s FROM sales WHERE 1=1' + rk.sql, ...rk.p).s;
+  const totalCollected = q.get('SELECT COALESCE(SUM(paid_amount),0) s FROM sales WHERE 1=1' + rk.sql, ...rk.p).s;
   const totalDebt = totalRevenue - totalCollected;
-  const unpaidSales = q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone FROM sales s JOIN customers c ON s.customer_id=c.id WHERE s.payment_status != 'Ödendi' ORDER BY (s.price - s.paid_amount) DESC`);
-  const paymentMethods = q.all(`SELECT payment_method, COUNT(*) c, SUM(price) total FROM sales GROUP BY payment_method ORDER BY total DESC`);
-  const txGelir = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gelir'").s;
-  const txGider = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gider'").s;
+  const unpaidSales = q.all(`SELECT s.*, c.name as customer_name, c.phone as customer_phone FROM sales s JOIN customers c ON s.customer_id=c.id WHERE s.payment_status != 'Ödendi'` + rks.sql + ` ORDER BY (s.price - s.paid_amount) DESC`, ...rks.p);
+  const paymentMethods = q.all(`SELECT payment_method, COUNT(*) c, SUM(price) total FROM sales WHERE 1=1` + rk.sql + ` GROUP BY payment_method ORDER BY total DESC`, ...rk.p);
+  const txGelir = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gelir'" + rk.sql, ...rk.p).s;
+  const txGider = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gider'" + rk.sql, ...rk.p).s;
   const netProfit = totalCollected + txGelir - txGider;
-  const expenseByCat = q.all("SELECT COALESCE(NULLIF(category,''),'Diğer') category, SUM(amount) total FROM transactions WHERE type='gider' GROUP BY category ORDER BY total DESC");
+  const expenseByCat = q.all("SELECT COALESCE(NULLIF(category,''),'Diğer') category, SUM(amount) total FROM transactions WHERE type='gider'" + rk.sql + " GROUP BY category ORDER BY total DESC", ...rk.p);
   res.render('reports', { monthlySales: monthlySales.reverse(), topProducts, topCustomers, totalRevenue, totalCollected, totalDebt, unpaidSales, paymentMethods, txGelir, txGider, netProfit, expenseByCat, page: 'reports', title: 'Raporlar' });
 });
 
 // --- Kasa (Gelir / Gider) ---
 app.get('/kasa', auth, (req, res) => {
-  const transactions = q.all('SELECT * FROM transactions ORDER BY tx_date DESC, id DESC');
-  const gelir = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gelir'").s;
-  const gider = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gider'").s;
+  const rk = rolKosulu(req, 'AND');
+  const transactions = q.all('SELECT * FROM transactions WHERE 1=1' + rk.sql + ' ORDER BY tx_date DESC, id DESC', ...rk.p);
+  const gelir = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gelir'" + rk.sql, ...rk.p).s;
+  const gider = q.get("SELECT COALESCE(SUM(amount),0) s FROM transactions WHERE type='gider'" + rk.sql, ...rk.p).s;
   res.render('cashbook', { transactions, gelir, gider, net: gelir - gider, page: 'kasa', title: 'Kasa — Gelir / Gider' });
 });
 app.post('/kasa/kaydet', auth, (req, res) => {
@@ -1255,12 +1328,18 @@ app.post('/kasa/kaydet', auth, (req, res) => {
   const amount = gSayi(req.body.amount);
   const tx_date = gMetin(req.body.tx_date);
   const description = gMetin(req.body.description);
+  if (id) {
+    const mevcut = q.get('SELECT owner_role FROM transactions WHERE id=?', id);
+    if (!erisimVar(req, mevcut)) return res.redirect('/kasa');
+  }
   if (id) q.run('UPDATE transactions SET type=?,category=?,amount=?,tx_date=?,description=? WHERE id=?', t, category, amount, tx_date, description, id);
   else q.run('INSERT INTO transactions(type,category,amount,tx_date,description,owner_role,owner_name) VALUES(?,?,?,?,?,?,?)', t, category, amount, tx_date, description, req.session.user.role, req.session.user.name);
   req.session.flash = { type: 'success', msg: 'Kayıt eklendi' };
   res.redirect('/kasa');
 });
 app.post('/kasa/sil', auth, (req, res) => {
+  const kayit = q.get('SELECT owner_role FROM transactions WHERE id=?', req.body.id);
+  if (!erisimVar(req, kayit)) return res.redirect('/kasa');
   q.run('DELETE FROM transactions WHERE id=?', req.body.id);
   req.session.flash = { type: 'success', msg: 'Kayıt silindi' };
   res.redirect('/kasa');
@@ -1452,6 +1531,8 @@ app.post('/api/musteri/ekle', auth, (req, res) => {
 app.get('/teklif/:id/word', auth, async (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
+  // Başka rolün kaydına adres çubuğundan girilemesin.
+  if (!erisimVar(req, quote)) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   // Teklifi kim oluşturduysa onun firma bilgileri çıksın (logo gibi).
   const settings = settingsForRole(quote.owner_role);
