@@ -34,8 +34,8 @@
               <td class="py-3 pr-3 text-right"><%= money(i.unit_cost) %></td>
               <td class="py-3 text-center">
                 <div class="flex items-center justify-center gap-1">
-                  <button onclick="editStock(<%= i.id %>,'<%- i.product_name.replace(/'/g,"\\'") %>','<%= i.sku||'' %>',<%= i.quantity %>,<%= i.min_quantity %>,<%= i.unit_cost %>,'<%= i.category||'' %>')" class="text-muted hover:text-white p-1"><span class="material-symbols-outlined text-[18px]">edit</span></button>
-                  <button onclick="moveStock(<%= i.id %>,'<%- i.product_name.replace(/'/g,"\\'") %>')" class="text-muted hover:text-green-400 p-1"><span class="material-symbols-outlined text-[18px]">swap_vert</span></button>
+                  <button data-duzenle data-id="<%= i.id %>" data-ad="<%= i.product_name %>" data-sku="<%= i.sku||'' %>" data-adet="<%= i.quantity %>" data-min="<%= i.min_quantity %>" data-maliyet="<%= i.unit_cost %>" data-kategori="<%= i.category||'' %>" class="text-muted hover:text-white p-1"><span class="material-symbols-outlined text-[18px]">edit</span></button>
+                  <button data-hareket data-id="<%= i.id %>" data-ad="<%= i.product_name %>" class="text-muted hover:text-green-400 p-1"><span class="material-symbols-outlined text-[18px]">swap_vert</span></button>
                   <form method="POST" action="/stok/sil" class="inline" onsubmit="return confirm('Bu stok kaydını silmek istediğinden emin misin?')"><input type="hidden" name="id" value="<%= i.id %>"><button class="text-muted hover:text-red p-1"><span class="material-symbols-outlined text-[18px]">delete</span></button></form>
                 </div>
               </td>
@@ -156,6 +156,17 @@
 <% } %>
 
 <script>
+// Ürün adı öznitelikten okunuyor; satır içi onclick'e gömülmüyor ki
+// tırnak içeren adlar HTML'i bozup betik enjekte edemesin.
+document.querySelectorAll('[data-duzenle]').forEach(function (d) {
+  d.addEventListener('click', function () {
+    editStock(+d.dataset.id, d.dataset.ad, d.dataset.sku, +d.dataset.adet, +d.dataset.min, +d.dataset.maliyet, d.dataset.kategori);
+  });
+});
+document.querySelectorAll('[data-hareket]').forEach(function (d) {
+  d.addEventListener('click', function () { moveStock(+d.dataset.id, d.dataset.ad); });
+});
+
 function editStock(id,name,sku,qty,min,cost,cat){
   document.getElementById('sf-id').value=id;
   document.getElementById('sf-name').value=name;

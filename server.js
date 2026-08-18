@@ -3,6 +3,8 @@ const session = require('express-session');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
+const crypto = require('node:crypto');
+const oturumDeposuKur = require('./oturum-deposu');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
 const docx = require('docx');
@@ -389,6 +391,27 @@ async function sendBackupEmail() {
   } catch (e) { console.log('E-posta yedek hatası:', e.message); return { ok: false, error: e.message }; }
 }
 
+// ── Giriş denemesi sınırı ───────────────────────────────────────────
+// Arka kapı kapatıldıktan sonra şifre tek engel; sınırsız deneme bırakılırsa
+// kırılabilir. Aynı IP + kullanıcı adı için 15 dakikada 8 başarısız denemeden
+// sonra 15 dakika bekletiliyor.
+db.exec(`CREATE TABLE IF NOT EXISTS login_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip TEXT NOT NULL,
+  username TEXT NOT NULL,
+  at INTEGER NOT NULL
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(ip, username, at)');
+
+const DENEME_SINIRI = 8;
+const DENEME_PENCERESI = 15 * 60 * 1000;
+const denemeSay = (ip, u) => q.get('SELECT COUNT(*) c FROM login_attempts WHERE ip=? AND username=? AND at > ?', ip, u, Date.now() - DENEME_PENCERESI).c;
+const denemeYaz = (ip, u) => q.run('INSERT INTO login_attempts(ip,username,at) VALUES(?,?,?)', ip, u, Date.now());
+const denemeTemizle = (ip, u) => q.run('DELETE FROM login_attempts WHERE ip=? AND username=?', ip, u);
+setInterval(() => {
+  try { q.run('DELETE FROM login_attempts WHERE at < ?', Date.now() - DENEME_PENCERESI); } catch {}
+}, 10 * 60 * 1000).unref?.();
+
 // Multer for file uploads
 const upload = multer({ dest: path.join(DB_DIR, 'uploads'), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -441,6 +464,10 @@ const PARA_BIRIMLERI = {
 const VARSAYILAN_PARA = 'TRY';
 const paraKodu  = (k) => (PARA_BIRIMLERI[k] ? k : VARSAYILAN_PARA);
 const paraSimge = (k) => PARA_BIRIMLERI[paraKodu(k)].simge;
+// Gövdeden gelen değerler: alan hiç gönderilmezse undefined SQLite'a
+// bağlanamıyor ve istek 500 ile düşüyor. Metin/sayıya sabitliyoruz.
+const gMetin = (v) => (v === undefined || v === null ? '' : String(v));
+const gSayi  = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const paraYaz   = (n, k) => Number(n || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2 }) + ' ' + paraSimge(k);
 
 // Kalemleri para birimine göre gruplar, her grubun kendi indirim/KDV/toplamını çıkarır.
@@ -480,7 +507,30 @@ app.set('views', path.join(__dirname, 'views'));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(session({ secret: 'ram-iklimlendirme-2026', resave: false, saveUninitialized: false }));
+// Oturum anahtarı koda gömülü değil: ortam değişkeni varsa o kullanılıyor,
+// yoksa ilk açılışta rastgele üretilip veritabanında saklanıyor.
+function oturumAnahtari() {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const kayit = q.get("SELECT value FROM settings WHERE key='session_secret'");
+  if (kayit && kayit.value) return kayit.value;
+  const yeni = crypto.randomBytes(32).toString('hex');
+  q.run("INSERT INTO settings(key,value) VALUES('session_secret',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", yeni);
+  return yeni;
+}
+
+// Hostinger'ın vekil sunucusunun arkasındayız; gerçek ziyaretçi IP'si buradan
+// okunuyor. Giriş denemesi sayacı IP'ye bakıyor, yoksa herkes tek adresten
+// geliyormuş gibi görünür ve biri diğerlerini kilitleyebilirdi.
+app.set('trust proxy', 1);
+
+// Oturumlar bellekte değil veritabanında: her dağıtımda herkes çıkış
+// yapmasın diye.
+app.use(session({
+  store: oturumDeposuKur(db, q),
+  secret: oturumAnahtari(),
+  resave: false,
+  saveUninitialized: false,
+}));
 
 // Auth middleware
 function auth(req, res, next) {
@@ -508,11 +558,22 @@ app.use((req, res, next) => {
 // --- Giriş ---
 app.get('/giris', (req, res) => res.render('login'));
 app.post('/giris', (req, res) => {
-  const user = q.get('SELECT * FROM users WHERE username=?', req.body.username);
+  const ip = req.ip || '?';
+  const username = String(req.body.username || '');
+
+  if (denemeSay(ip, username) >= DENEME_SINIRI) {
+    req.session.flash = { type: 'error', msg: 'Çok fazla hatalı deneme. 15 dakika sonra tekrar deneyin.' };
+    return res.redirect('/giris');
+  }
+
+  const user = q.get('SELECT * FROM users WHERE username=?', username);
   if (!user || !bcrypt.compareSync(String(req.body.password || ''), user.password)) {
+    denemeYaz(ip, username);
     req.session.flash = { type: 'error', msg: 'Kullanıcı adı veya şifre hatalı' };
     return res.redirect('/giris');
   }
+
+  denemeTemizle(ip, username);
   req.session.user = { id: user.id, name: user.name, username: user.username, role: user.role || 'admin' };
   res.redirect('/');
 });
@@ -544,7 +605,14 @@ app.get('/musteriler', auth, (req, res) => {
 
 app.get('/musteri/yeni', auth, (req, res) => res.render('customer-form', { customer: null }));
 app.post('/musteri/kaydet', auth, (req, res) => {
-  const { id, name, phone, email, address, city, notes } = req.body;
+  const { id } = req.body;
+  // Alan gönderilmezse undefined SQLite'a bağlanamıyor ve istek 500 ile düşüyordu.
+  const [name, phone, email, address, city, notes] =
+    ['name', 'phone', 'email', 'address', 'city', 'notes'].map((k) => gMetin(req.body[k]));
+  if (!name.trim()) {
+    req.session.flash = { type: 'error', msg: 'Ad Soyad zorunlu' };
+    return res.redirect(id ? '/musteri/duzenle/' + id : '/musteri/yeni');
+  }
   if (id) {
     q.run('UPDATE customers SET name=?,phone=?,email=?,address=?,city=?,notes=? WHERE id=?', name, phone, email, address, city, notes, id);
     req.session.flash = { type: 'success', msg: 'Müşteri güncellendi' };
@@ -569,9 +637,27 @@ app.get('/musteri/duzenle/:id', auth, (req, res) => {
 });
 
 app.post('/musteri/sil', auth, (req, res) => {
-  q.run('DELETE FROM sales WHERE customer_id=?', req.body.id);
-  q.run('DELETE FROM customers WHERE id=?', req.body.id);
-  req.session.flash = { type: 'success', msg: 'Müşteri silindi' };
+  const id = req.body.id;
+  // Teklifler müşteriye yabancı anahtarla bağlı. Eskiden önce satışlar
+  // siliniyor, sonra müşteri silme yabancı anahtar hatasıyla patlıyordu:
+  // satışlar gitmiş, müşteri duruyordu. Artık önce kontrol ediliyor ve
+  // silme tek işlemde yapılıyor.
+  const teklifSayisi = q.get('SELECT COUNT(*) c FROM quotes WHERE customer_id=?', id).c;
+  if (teklifSayisi > 0) {
+    req.session.flash = { type: 'error', msg: `Bu müşterinin ${teklifSayisi} teklifi var. Önce teklifleri silin, sonra müşteriyi silebilirsiniz.` };
+    return res.redirect('/musteri/' + id);
+  }
+  try {
+    db.exec('BEGIN');
+    q.run('DELETE FROM sales WHERE customer_id=?', id);
+    q.run('DELETE FROM customers WHERE id=?', id);
+    db.exec('COMMIT');
+    req.session.flash = { type: 'success', msg: 'Müşteri ve satış kayıtları silindi' };
+  } catch (e) {
+    db.exec('ROLLBACK');
+    req.session.flash = { type: 'error', msg: 'Müşteri silinemedi: ' + e.message };
+    return res.redirect('/musteri/' + id);
+  }
   res.redirect('/musteriler');
 });
 
@@ -592,9 +678,21 @@ app.get('/satis/yeni', auth, (req, res) => {
 });
 
 app.post('/satis/kaydet', auth, (req, res) => {
-  const { id, customer_id, product_name, ic_unite_seri, dis_unite_seri, sale_date, price, payment_method, payment_status, notes } = req.body;
-  const paid = req.body.paid_amount !== '' ? Number(req.body.paid_amount) : Number(price);
-  const status = payment_status || (paid >= Number(price) ? 'Ödendi' : 'Kısmi Ödeme');
+  const { id } = req.body;
+  const customer_id = req.body.customer_id || null;
+  const product_name = gMetin(req.body.product_name);
+  const ic_unite_seri = gMetin(req.body.ic_unite_seri);
+  const dis_unite_seri = gMetin(req.body.dis_unite_seri);
+  const sale_date = gMetin(req.body.sale_date);
+  const price = gSayi(req.body.price);
+  const payment_method = gMetin(req.body.payment_method) || 'Nakit';
+  const notes = gMetin(req.body.notes);
+  if (!product_name.trim() || !customer_id) {
+    req.session.flash = { type: 'error', msg: 'Müşteri ve ürün adı zorunlu' };
+    return res.redirect(id ? '/satis/duzenle/' + id : '/satis/yeni');
+  }
+  const paid = gMetin(req.body.paid_amount) !== '' ? gSayi(req.body.paid_amount) : price;
+  const status = gMetin(req.body.payment_status) || (paid >= price ? 'Ödendi' : 'Kısmi Ödeme');
   if (id) {
     q.run('UPDATE sales SET customer_id=?,product_name=?,ic_unite_seri=?,dis_unite_seri=?,sale_date=?,price=?,paid_amount=?,payment_method=?,payment_status=?,notes=? WHERE id=?',
       customer_id, product_name, ic_unite_seri, dis_unite_seri, sale_date, price, paid, payment_method, status, notes, id);
@@ -603,6 +701,13 @@ app.post('/satis/kaydet', auth, (req, res) => {
   }
   const r = q.run('INSERT INTO sales(customer_id,product_name,ic_unite_seri,dis_unite_seri,sale_date,price,paid_amount,payment_method,payment_status,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     customer_id, product_name, ic_unite_seri, dis_unite_seri, sale_date, price, paid, payment_method, status, notes, req.session.user.role, req.session.user.name);
+  // Satışla birlikte alınan ödeme tahsilat listesine de yazılıyor. Yazılmazsa
+  // sonradan bir tahsilat girildiğinde toplam yalnızca payments tablosundan
+  // hesaplandığı için peşinat yok sayılıyor ve müşteri fazla borçlu görünüyordu.
+  if (paid > 0) {
+    q.run('INSERT INTO payments(sale_id,amount,payment_date,method,note) VALUES(?,?,?,?,?)',
+      r.lastInsertRowid, paid, sale_date, payment_method, 'Satışla birlikte alınan ödeme');
+  }
   req.session.flash = { type: 'success', msg: 'Satış kaydedildi' };
   res.redirect('/satis/' + r.lastInsertRowid);
 });
@@ -630,9 +735,30 @@ app.post('/satis/sil', auth, (req, res) => {
 
 // --- Ödeme Kaydet ---
 app.post('/odeme/kaydet', auth, (req, res) => {
-  const { sale_id, amount, payment_date, method, note } = req.body;
-  q.run('INSERT INTO payments(sale_id,amount,payment_date,method,note) VALUES(?,?,?,?,?)', sale_id, Number(amount), payment_date, method, note);
-  const sale = q.get('SELECT price FROM sales WHERE id=?', sale_id);
+  const sale_id = req.body.sale_id;
+  // Satış başka bir sekmede silinmiş olabilir; yoksa eskiden sale.price
+  // okunurken çöküyordu.
+  const sale = q.get('SELECT price, paid_amount FROM sales WHERE id=?', sale_id);
+  if (!sale) {
+    req.session.flash = { type: 'error', msg: 'Satış bulunamadı' };
+    return res.redirect('/satislar');
+  }
+  const amount = gSayi(req.body.amount);
+  if (amount <= 0) {
+    req.session.flash = { type: 'error', msg: 'Tahsilat tutarı sıfırdan büyük olmalı' };
+    return res.redirect('/satis/' + sale_id);
+  }
+  // Bu düzeltmeden önce açılmış satışlarda peşinat yalnızca sales.paid_amount
+  // içinde duruyor. Toplamı ezmemek için farkı bir kez telafi satırı olarak
+  // ekliyoruz.
+  const oncekiToplam = q.get('SELECT COALESCE(SUM(amount),0) s FROM payments WHERE sale_id=?', sale_id).s;
+  const kayitsiz = Number(sale.paid_amount || 0) - oncekiToplam;
+  if (kayitsiz > 0.009) {
+    q.run('INSERT INTO payments(sale_id,amount,payment_date,method,note) VALUES(?,?,?,?,?)',
+      sale_id, kayitsiz, gMetin(req.body.payment_date), 'Nakit', 'Önceden alınmış ödeme (kayda geçirildi)');
+  }
+  q.run('INSERT INTO payments(sale_id,amount,payment_date,method,note) VALUES(?,?,?,?,?)',
+    sale_id, amount, gMetin(req.body.payment_date), gMetin(req.body.method) || 'Nakit', gMetin(req.body.note));
   const totalPaid = q.get('SELECT COALESCE(SUM(amount),0) s FROM payments WHERE sale_id=?', sale_id).s;
   const status = totalPaid >= sale.price ? 'Ödendi' : 'Kısmi Ödeme';
   q.run('UPDATE sales SET paid_amount=?, payment_status=? WHERE id=?', totalPaid, status, sale_id);
@@ -1025,13 +1151,23 @@ app.get('/stok', auth, (req, res) => {
 });
 
 app.post('/stok/kaydet', auth, (req, res) => {
-  const { id, product_name, sku, quantity, min_quantity, unit_cost, category } = req.body;
+  const { id } = req.body;
+  const product_name = gMetin(req.body.product_name);
+  const sku = gMetin(req.body.sku);
+  const category = gMetin(req.body.category);
+  const quantity = gSayi(req.body.quantity);
+  const min_quantity = gSayi(req.body.min_quantity);
+  const unit_cost = gSayi(req.body.unit_cost);
+  if (!product_name.trim()) {
+    req.session.flash = { type: 'error', msg: 'Ürün adı zorunlu' };
+    return res.redirect('/stok');
+  }
   if (id) {
-    q.run('UPDATE stock SET product_name=?,sku=?,quantity=?,min_quantity=?,unit_cost=?,category=? WHERE id=?', product_name, sku, Number(quantity), Number(min_quantity), Number(unit_cost), category, id);
+    q.run('UPDATE stock SET product_name=?,sku=?,quantity=?,min_quantity=?,unit_cost=?,category=? WHERE id=?', product_name, sku, quantity, min_quantity, unit_cost, category, id);
     req.session.flash = { type: 'success', msg: 'Stok güncellendi' };
   } else {
-    const r = q.run('INSERT INTO stock(product_name,sku,quantity,min_quantity,unit_cost,category,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?)', product_name, sku, Number(quantity), Number(min_quantity), Number(unit_cost), category, req.session.user.role, req.session.user.name);
-    q.run('INSERT INTO stock_movements(stock_id,type,quantity,note,user_name) VALUES(?,?,?,?,?)', r.lastInsertRowid, 'giris', Number(quantity), 'İlk stok girişi', req.session.user.name);
+    const r = q.run('INSERT INTO stock(product_name,sku,quantity,min_quantity,unit_cost,category,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?)', product_name, sku, quantity, min_quantity, unit_cost, category, req.session.user.role, req.session.user.name);
+    q.run('INSERT INTO stock_movements(stock_id,type,quantity,note,user_name) VALUES(?,?,?,?,?)', r.lastInsertRowid, 'giris', quantity, 'İlk stok girişi', req.session.user.name);
     req.session.flash = { type: 'success', msg: 'Stok eklendi' };
   }
   res.redirect('/stok');
@@ -1082,10 +1218,14 @@ app.get('/kasa', auth, (req, res) => {
   res.render('cashbook', { transactions, gelir, gider, net: gelir - gider, page: 'kasa', title: 'Kasa — Gelir / Gider' });
 });
 app.post('/kasa/kaydet', auth, (req, res) => {
-  const { id, type, category, amount, tx_date, description } = req.body;
-  const t = type === 'gider' ? 'gider' : 'gelir';
-  if (id) q.run('UPDATE transactions SET type=?,category=?,amount=?,tx_date=?,description=? WHERE id=?', t, category, Number(amount), tx_date, description, id);
-  else q.run('INSERT INTO transactions(type,category,amount,tx_date,description,owner_role,owner_name) VALUES(?,?,?,?,?,?,?)', t, category, Number(amount), tx_date, description, req.session.user.role, req.session.user.name);
+  const { id } = req.body;
+  const t = req.body.type === 'gider' ? 'gider' : 'gelir';
+  const category = gMetin(req.body.category);
+  const amount = gSayi(req.body.amount);
+  const tx_date = gMetin(req.body.tx_date);
+  const description = gMetin(req.body.description);
+  if (id) q.run('UPDATE transactions SET type=?,category=?,amount=?,tx_date=?,description=? WHERE id=?', t, category, amount, tx_date, description, id);
+  else q.run('INSERT INTO transactions(type,category,amount,tx_date,description,owner_role,owner_name) VALUES(?,?,?,?,?,?,?)', t, category, amount, tx_date, description, req.session.user.role, req.session.user.name);
   req.session.flash = { type: 'success', msg: 'Kayıt eklendi' };
   res.redirect('/kasa');
 });
@@ -1179,9 +1319,19 @@ app.post('/ayarlar', auth, (req, res) => {
 });
 
 app.post('/ayarlar/sifre', auth, (req, res) => {
-  const { new_password, confirm_password } = req.body;
-  if (new_password.length < 4) {
-    req.session.flash = { type: 'error', msg: 'Yeni şifre en az 4 karakter olmalı' };
+  const new_password = String(req.body.new_password || '');
+  const confirm_password = String(req.body.confirm_password || '');
+  const current_password = String(req.body.current_password || '');
+
+  // Açık kalmış bir oturumu bulan biri şifreyi değiştirip hesabı ele
+  // geçiremesin diye mevcut şifre soruluyor.
+  const kullanici = q.get('SELECT password FROM users WHERE id=?', req.session.user.id);
+  if (!kullanici || !bcrypt.compareSync(current_password, kullanici.password)) {
+    req.session.flash = { type: 'error', msg: 'Mevcut şifre hatalı' };
+    return res.redirect('/ayarlar');
+  }
+  if (new_password.length < 8) {
+    req.session.flash = { type: 'error', msg: 'Yeni şifre en az 8 karakter olmalı' };
     return res.redirect('/ayarlar');
   }
   if (new_password !== confirm_password) {
@@ -1230,7 +1380,7 @@ app.get('/hesaplar', auth, adminOnly, (req, res) => {
 });
 app.post('/hesaplar/sifre', auth, adminOnly, (req, res) => {
   const { id, new_password } = req.body;
-  if (!new_password || new_password.length < 4) { req.session.flash = { type: 'error', msg: 'Şifre en az 4 karakter olmalı' }; return res.redirect('/hesaplar'); }
+  if (!new_password || String(new_password).length < 8) { req.session.flash = { type: 'error', msg: 'Şifre en az 8 karakter olmalı' }; return res.redirect('/hesaplar'); }
   q.run('UPDATE users SET password=? WHERE id=?', bcrypt.hashSync(new_password, 10), id);
   req.session.flash = { type: 'success', msg: 'Şifre güncellendi' };
   res.redirect('/hesaplar');
