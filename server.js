@@ -397,6 +397,10 @@ try { db.exec("ALTER TABLE sales ADD COLUMN paid_amount REAL NOT NULL DEFAULT 0"
 try { db.exec("ALTER TABLE sales ADD COLUMN payment_status TEXT DEFAULT 'Ödendi'"); } catch {}
 try { db.exec("UPDATE sales SET paid_amount=price, payment_status='Ödendi' WHERE paid_amount=0 AND price>0"); } catch {}
 try { db.exec("ALTER TABLE stock_movements ADD COLUMN user_name TEXT"); } catch {}
+// Teklif kalemleri para birimi taşıyor: bir teklifte hem TL hem dolar kalem olabiliyor.
+try { db.exec("ALTER TABLE quote_items ADD COLUMN currency TEXT DEFAULT 'TRY'"); } catch {}
+// Tutar cinsinden indirim hangi para biriminden düşülecek.
+try { db.exec("ALTER TABLE quotes ADD COLUMN discount_currency TEXT DEFAULT 'TRY'"); } catch {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   type TEXT NOT NULL,
@@ -423,6 +427,44 @@ ensureUser('admin', 'admin123', 'Yönetici', 'admin');
 ensureUser('bayi', 'bayi123', 'Bayi', 'bayi');
 ensureUser('servis', 'servis123', 'Servis', 'servis');
 try { db.exec("UPDATE users SET role='admin' WHERE role IS NULL OR role=''"); } catch {}
+
+// ── Para birimleri ────────────────────────────────────────────────
+// Kur çevrimi bilerek yok: fiyat hangi para birimindeyse o şekilde
+// giriliyor. Bu yüzden farklı para birimleri toplanamaz — her biri
+// teklifin altında kendi sütununda toplanıyor.
+const PARA_BIRIMLERI = {
+  TRY: { simge: '\u20ba', ad: 'Türk Lirası' },
+  USD: { simge: '$',       ad: 'Dolar' },
+  EUR: { simge: '\u20ac', ad: 'Euro' },
+  GBP: { simge: '\u00a3', ad: 'Sterlin' },
+};
+const VARSAYILAN_PARA = 'TRY';
+const paraKodu  = (k) => (PARA_BIRIMLERI[k] ? k : VARSAYILAN_PARA);
+const paraSimge = (k) => PARA_BIRIMLERI[paraKodu(k)].simge;
+const paraYaz   = (n, k) => Number(n || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2 }) + ' ' + paraSimge(k);
+
+// Kalemleri para birimine göre gruplar, her grubun kendi indirim/KDV/toplamını çıkarır.
+function paraGruplari(items, quote) {
+  const gruplar = new Map();
+  for (const it of items) {
+    const kod = paraKodu(it.currency);
+    if (!gruplar.has(kod)) gruplar.set(kod, { kod, simge: paraSimge(kod), items: [], subtotal: 0 });
+    const g = gruplar.get(kod);
+    g.items.push(it);
+    g.subtotal += Number(it.quantity) * Number(it.unit_price);
+  }
+  const indirimParasi = paraKodu(quote.discount_currency);
+  for (const g of gruplar.values()) {
+    if (quote.discount_type === 'percent') g.discount = g.subtotal * Number(quote.discount_value || 0) / 100;
+    else if (quote.discount_type === 'amount' && g.kod === indirimParasi) g.discount = Math.min(Number(quote.discount_value || 0), g.subtotal);
+    else g.discount = 0;
+    g.afterDiscount = g.subtotal - g.discount;
+    g.tax = g.afterDiscount * Number(quote.tax_rate || 0) / 100;
+    g.total = g.afterDiscount + g.tax;
+  }
+  if (!gruplar.size) return [{ kod: VARSAYILAN_PARA, simge: paraSimge(VARSAYILAN_PARA), items: [], subtotal: 0, discount: 0, afterDiscount: 0, tax: 0, total: 0 }];
+  return Array.from(gruplar.values());
+}
 
 const q = {
   all: (sql, ...p) => db.prepare(sql).all(...p),
@@ -600,13 +642,17 @@ app.post('/odeme/kaydet', auth, (req, res) => {
 
 // --- Teklifler ---
 app.get('/teklifler', auth, (req, res) => {
-  const quotes = q.all(`SELECT q.*, (SELECT SUM(qi.quantity * qi.unit_price) FROM quote_items qi WHERE qi.quote_id=q.id) as subtotal FROM quotes q ORDER BY q.created_at DESC`);
-  res.render('quotes', { quotes, page: 'quotes', title: 'Teklifler' });
+  const quotes = q.all('SELECT * FROM quotes ORDER BY created_at DESC');
+  // Listede tek toplam gösterilemiyor: bir teklifte birden çok para birimi olabilir.
+  for (const t of quotes) {
+    t.gruplar = paraGruplari(q.all('SELECT * FROM quote_items WHERE quote_id=?', t.id), t);
+  }
+  res.render('quotes', { quotes, paraYaz, page: 'quotes', title: 'Teklifler' });
 });
 
 app.get('/teklif/yeni', auth, (req, res) => {
   const customers = q.all('SELECT id,name,phone,address,city FROM customers ORDER BY name');
-  res.render('quote-form', { quote: null, items: [], customers, page: 'quotes', title: 'Yeni Teklif' });
+  res.render('quote-form', { quote: null, items: [], customers, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, page: 'quotes', title: 'Yeni Teklif' });
 });
 
 app.get('/teklif/duzenle/:id', auth, (req, res) => {
@@ -614,7 +660,7 @@ app.get('/teklif/duzenle/:id', auth, (req, res) => {
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const customers = q.all('SELECT id,name,phone,address,city FROM customers ORDER BY name');
-  res.render('quote-form', { quote, items, customers, page: 'quotes', title: 'Teklif Düzenle' });
+  res.render('quote-form', { quote, items, customers, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, page: 'quotes', title: 'Teklif Düzenle' });
 });
 
 // --- Excel Import (must be before /teklif/:id) ---
@@ -679,13 +725,13 @@ app.post('/teklif/excel-import', auth, upload.single('file'), async (req, res) =
     const validDate = new Date(trNow().getTime() + validDays * 86400000).toISOString().slice(0, 10);
     const taxRate = Number(settings.default_tax_rate) || 20;
 
-    const r = q.run('INSERT INTO quotes(customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,tax_rate,notes) VALUES(?,?,?,?,?,?,?,?,?,?)',
-      req.body.customer_name || '', req.body.customer_phone || '', req.body.customer_address || '', today, validDate, 'Taslak', 'percent', 0, taxRate, 'Excel dosyasından içe aktarıldı');
+    const r = q.run('INSERT INTO quotes(customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,discount_currency,tax_rate,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      req.body.customer_name || '', req.body.customer_phone || '', req.body.customer_address || '', today, validDate, 'Taslak', 'percent', 0, VARSAYILAN_PARA, taxRate, 'Excel dosyasından içe aktarıldı');
     const quoteId = r.lastInsertRowid;
 
     items.forEach(item => {
-      q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price) VALUES(?,?,?,?,?,?)',
-        quoteId, item.product_name, item.description, item.quantity, item.unit, item.unit_price);
+      q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price,currency) VALUES(?,?,?,?,?,?,?)',
+        quoteId, item.product_name, item.description, item.quantity, item.unit, item.unit_price, VARSAYILAN_PARA);
     });
 
     req.session.flash = { type: 'success', msg: `${items.length} ürün Excel'den içe aktarıldı` };
@@ -705,6 +751,7 @@ app.post('/teklif/kaydet', auth, (req, res) => {
   const qtys = raw('item_qty');
   const units = raw('item_unit');
   const prices = raw('item_price');
+  const curs = raw('item_currency');
 
   let cName = customer_name, cPhone = customer_phone, cAddr = customer_address;
   if (customer_id) {
@@ -714,20 +761,20 @@ app.post('/teklif/kaydet', auth, (req, res) => {
 
   let quoteId;
   if (id) {
-    q.run('UPDATE quotes SET customer_id=?,customer_name=?,customer_phone=?,customer_address=?,quote_date=?,valid_until=?,status=?,discount_type=?,discount_value=?,tax_rate=?,notes=? WHERE id=?',
-      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, Number(tax_rate) || 20, notes || '', id);
+    q.run('UPDATE quotes SET customer_id=?,customer_name=?,customer_phone=?,customer_address=?,quote_date=?,valid_until=?,status=?,discount_type=?,discount_value=?,discount_currency=?,tax_rate=?,notes=? WHERE id=?',
+      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, paraKodu(req.body.discount_currency), Number(tax_rate) || 20, notes || '', id);
     quoteId = id;
     q.run('DELETE FROM quote_items WHERE quote_id=?', quoteId);
   } else {
-    const r = q.run('INSERT INTO quotes(customer_id,customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,tax_rate,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, Number(tax_rate) || 20, notes || '', req.session.user.role, req.session.user.name);
+    const r = q.run('INSERT INTO quotes(customer_id,customer_name,customer_phone,customer_address,quote_date,valid_until,status,discount_type,discount_value,discount_currency,tax_rate,notes,owner_role,owner_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      customer_id || null, cName || '', cPhone || '', cAddr || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, paraKodu(req.body.discount_currency), Number(tax_rate) || 20, notes || '', req.session.user.role, req.session.user.name);
     quoteId = r.lastInsertRowid;
   }
 
   for (let i = 0; i < names.length; i++) {
     if (!names[i]) continue;
-    q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price) VALUES(?,?,?,?,?,?)',
-      quoteId, names[i], descs[i] || '', Number(qtys[i]) || 1, units[i] || 'Adet', Number(prices[i]) || 0);
+    q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price,currency) VALUES(?,?,?,?,?,?,?)',
+      quoteId, names[i], descs[i] || '', Number(qtys[i]) || 1, units[i] || 'Adet', Number(prices[i]) || 0, paraKodu(curs[i]));
   }
 
   req.session.flash = { type: 'success', msg: id ? 'Teklif güncellendi' : 'Teklif oluşturuldu' };
@@ -741,7 +788,7 @@ app.get('/teklif/:id/editor', auth, (req, res) => {
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const settings = getSettings();
   const printLogo = logoForRole(quote.owner_role, settings);
-  res.render('quote-editor', { quote, items, settings, printLogo, layout: false });
+  res.render('quote-editor', { quote, items, settings, printLogo, PARA_BIRIMLERI, VARSAYILAN_PARA, paraKodu, layout: false });
 });
 
 // --- API: Belge Düzenleyiciden Kaydet ---
@@ -750,15 +797,15 @@ app.post('/api/teklif/kaydet', auth, (req, res) => {
     const { id, customer_name, customer_phone, customer_address, quote_date, valid_until, status, discount_type, discount_value, tax_rate, notes, items, settings: s } = req.body;
     if (!id) return res.json({ ok: false, msg: 'ID gerekli' });
 
-    q.run('UPDATE quotes SET customer_name=?,customer_phone=?,customer_address=?,quote_date=?,valid_until=?,status=?,discount_type=?,discount_value=?,tax_rate=?,notes=? WHERE id=?',
-      customer_name || '', customer_phone || '', customer_address || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, Number(tax_rate) || 20, notes || '', id);
+    q.run('UPDATE quotes SET customer_name=?,customer_phone=?,customer_address=?,quote_date=?,valid_until=?,status=?,discount_type=?,discount_value=?,discount_currency=?,tax_rate=?,notes=? WHERE id=?',
+      customer_name || '', customer_phone || '', customer_address || '', quote_date || '', valid_until || '', status || 'Taslak', discount_type || 'percent', Number(discount_value) || 0, paraKodu(req.body.discount_currency), Number(tax_rate) || 20, notes || '', id);
 
     q.run('DELETE FROM quote_items WHERE quote_id=?', id);
     if (items && items.length) {
       items.forEach(item => {
         if (!item.product_name) return;
-        q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price) VALUES(?,?,?,?,?,?)',
-          id, item.product_name, item.description || '', Number(item.quantity) || 1, item.unit || 'Adet', Number(item.unit_price) || 0);
+        q.run('INSERT INTO quote_items(quote_id,product_name,description,quantity,unit,unit_price,currency) VALUES(?,?,?,?,?,?,?)',
+          id, item.product_name, item.description || '', Number(item.quantity) || 1, item.unit || 'Adet', Number(item.unit_price) || 0, paraKodu(item.currency));
       });
     }
 
@@ -778,43 +825,25 @@ app.get('/teklif/:id', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const subtotal = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  let discount = 0;
-  if (quote.discount_type === 'percent') discount = subtotal * quote.discount_value / 100;
-  else if (quote.discount_type === 'amount') discount = quote.discount_value;
-  const afterDiscount = subtotal - discount;
-  const tax = afterDiscount * quote.tax_rate / 100;
-  const total = afterDiscount + tax;
-  res.render('quote-detail', { quote, items, subtotal, discount, afterDiscount, tax, total, page: 'quotes', title: 'Teklif #' + quote.id });
+  const gruplar = paraGruplari(items, quote);
+  res.render('quote-detail', { quote, items, gruplar, paraSimge, paraYaz, page: 'quotes', title: 'Teklif #' + quote.id });
 });
 
 app.get('/teklif/:id/yazdir', auth, (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const subtotal = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  let discount = 0;
-  if (quote.discount_type === 'percent') discount = subtotal * quote.discount_value / 100;
-  else if (quote.discount_type === 'amount') discount = quote.discount_value;
-  const afterDiscount = subtotal - discount;
-  const tax = afterDiscount * quote.tax_rate / 100;
-  const total = afterDiscount + tax;
+  const gruplar = paraGruplari(items, quote);
   const settings = getSettings();
   const printLogo = logoForRole(quote.owner_role, settings);
-  res.render('quote-print', { quote, items, subtotal, discount, afterDiscount, tax, total, settings, printLogo, layout: false });
+  res.render('quote-print', { quote, items, gruplar, paraSimge, paraYaz, settings, printLogo, layout: false });
 });
 
 app.get('/teklif/:id/excel', auth, async (req, res) => {
   const quote = q.get('SELECT * FROM quotes WHERE id=?', req.params.id);
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
-  const subtotal = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  let discount = 0;
-  if (quote.discount_type === 'percent') discount = subtotal * quote.discount_value / 100;
-  else if (quote.discount_type === 'amount') discount = quote.discount_value;
-  const afterDiscount = subtotal - discount;
-  const tax = afterDiscount * quote.tax_rate / 100;
-  const total = afterDiscount + tax;
+  const gruplar = paraGruplari(items, quote);
 
   const settings = getSettings();
   const wb = new ExcelJS.Workbook();
@@ -883,7 +912,8 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
   ws.getCell('A9').font = { bold: true, size: 11 };
   ws.getCell('A9').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: gray } };
   ws.mergeCells('E9:G9');
-  ws.getCell('E9').value = `Durum: ${quote.status}`;
+  ws.getCell('E9').value = `KDV Oranı: %${quote.tax_rate}${quote.discount_value > 0 ? '  |  İndirim: ' + (quote.discount_type === 'percent' ? '%' + quote.discount_value : quote.discount_value + ' ' + paraSimge(quote.discount_currency)) : ''}`;
+  ws.getCell('E9').font = { size: 10, color: { argb: darkGray } };
   ws.getCell('E9').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: gray } };
 
   ws.mergeCells('A10:C10');
@@ -891,12 +921,12 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
   ws.getCell('A10').font = { size: 10, color: { argb: darkGray } };
   ws.getCell('A10').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: gray } };
   ws.mergeCells('E10:G10');
-  ws.getCell('E10').value = `KDV Oranı: %${quote.tax_rate}${quote.discount_value > 0 ? '  |  İndirim: ' + (quote.discount_type === 'percent' ? '%' + quote.discount_value : quote.discount_value + ' ₺') : ''}`;
-  ws.getCell('E10').font = { size: 10, color: { argb: darkGray } };
   ws.getCell('E10').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: gray } };
 
   // Tablo başlığı
-  const headers = ['#', 'Ürün / Hizmet', 'Açıklama', 'Miktar', 'Birim', 'Birim Fiyat (₺)', 'Toplam (₺)'];
+  // Para birimi kalem başına değiştiği için sütun adında sabit simge yok.
+  const headers = ['#', 'Ürün / Hizmet', 'Açıklama', 'Miktar', 'Birim', 'Birim Fiyat', 'Toplam'];
+  const sayiBicimi = (kod) => '#,##0.00 "' + paraSimge(kod) + '"';
   const hRow = ws.getRow(12);
   headers.forEach((h, i) => {
     const cell = hRow.getCell(i + 1);
@@ -920,10 +950,10 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
     row.getCell(5).value = item.unit;
     row.getCell(5).alignment = { horizontal: 'center' };
     row.getCell(6).value = item.unit_price;
-    row.getCell(6).numFmt = '#,##0.00 "₺"';
+    row.getCell(6).numFmt = sayiBicimi(item.currency);
     row.getCell(6).alignment = { horizontal: 'right' };
     row.getCell(7).value = item.quantity * item.unit_price;
-    row.getCell(7).numFmt = '#,##0.00 "₺"';
+    row.getCell(7).numFmt = sayiBicimi(item.currency);
     row.getCell(7).font = { bold: true };
     row.getCell(7).alignment = { horizontal: 'right' };
     if (i % 2 === 1) for (let c = 1; c <= 7; c++) row.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: gray } };
@@ -931,24 +961,31 @@ app.get('/teklif/:id/excel', auth, async (req, res) => {
 
   // Toplamlar
   const tStart = 13 + items.length + 1;
-  const addTotalRow = (label, value, style) => {
+  const addTotalRow = (label, value, kod, style) => {
     const r = ws.getRow(tStart + addTotalRow.idx++);
     ws.mergeCells(r.number, 2, r.number, 3);
     r.getCell(2).value = label;
     r.getCell(2).alignment = { horizontal: 'right' };
     r.getCell(2).font = style?.labelFont || { color: { argb: darkGray } };
-    r.getCell(7).value = value;
-    r.getCell(7).numFmt = '#,##0.00 "₺"';
-    r.getCell(7).alignment = { horizontal: 'right' };
-    r.getCell(7).font = style?.valueFont || {};
+    if (value !== null) {
+      r.getCell(7).value = value;
+      r.getCell(7).numFmt = sayiBicimi(kod);
+      r.getCell(7).alignment = { horizontal: 'right' };
+      r.getCell(7).font = style?.valueFont || {};
+    }
     if (style?.bg) for (let c = 1; c <= 7; c++) r.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: style.bg } };
     return r;
   };
   addTotalRow.idx = 0;
-  addTotalRow('Ara Toplam:', subtotal);
-  if (discount > 0) addTotalRow('İndirim:', -discount, { valueFont: { color: { argb: 'FF16A34A' } } });
-  addTotalRow(`KDV (%${quote.tax_rate}):`, tax);
-  addTotalRow('GENEL TOPLAM', total, { bg: red, labelFont: { bold: true, size: 13, color: { argb: white } }, valueFont: { bold: true, size: 13, color: { argb: white } } });
+  // Kur çevrimi yok: her para birimi kendi toplam bloğunu alıyor.
+  gruplar.forEach((g, gi) => {
+    if (gi) addTotalRow('', null, g.kod);
+    if (gruplar.length > 1) addTotalRow(`${g.simge} — ${g.kod}`, null, g.kod, { labelFont: { bold: true, size: 9, color: { argb: darkGray } } });
+    addTotalRow('Ara Toplam:', g.subtotal, g.kod);
+    if (g.discount > 0) addTotalRow('İndirim:', -g.discount, g.kod, { valueFont: { color: { argb: 'FF16A34A' } } });
+    addTotalRow(`KDV (%${quote.tax_rate}):`, g.tax, g.kod);
+    addTotalRow('GENEL TOPLAM', g.total, g.kod, { bg: red, labelFont: { bold: true, size: 13, color: { argb: white } }, valueFont: { bold: true, size: 13, color: { argb: white } } });
+  });
 
   // Notlar
   if (quote.notes) {
@@ -1232,14 +1269,8 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
   if (!quote) return res.redirect('/teklifler');
   const items = q.all('SELECT * FROM quote_items WHERE quote_id=? ORDER BY id', quote.id);
   const settings = getSettings();
-  const subtotal = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  let discount = 0;
-  if (quote.discount_type === 'percent') discount = subtotal * quote.discount_value / 100;
-  else if (quote.discount_type === 'amount') discount = quote.discount_value;
-  const afterDiscount = subtotal - discount;
-  const tax = afterDiscount * quote.tax_rate / 100;
-  const total = afterDiscount + tax;
-  const money = (n) => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2 }) + ' ₺';
+  const gruplar = paraGruplari(items, quote);
+  const money = (n, kod) => paraYaz(n, kod);
 
   const { Document, Paragraph, Table, TableRow, TableCell, TextRun, WidthType, AlignmentType, BorderStyle, HeadingLevel, ShadingType, ImageRun } = docx;
 
@@ -1289,8 +1320,8 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
       cell(item.description || '', colW[2], { font: { color: '666666' } }),
       cell(item.quantity, colW[3], { align: AlignmentType.CENTER }),
       cell(item.unit, colW[4], { align: AlignmentType.CENTER }),
-      cell(money(item.unit_price), colW[5], { align: AlignmentType.RIGHT }),
-      cell(money(item.quantity * item.unit_price), colW[6], { align: AlignmentType.RIGHT, font: { bold: true } }),
+      cell(money(item.unit_price, item.currency), colW[5], { align: AlignmentType.RIGHT }),
+      cell(money(item.quantity * item.unit_price, item.currency), colW[6], { align: AlignmentType.RIGHT, font: { bold: true } }),
     ]
   }));
 
@@ -1302,10 +1333,15 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
     margins: { top: 60, bottom: 60, left: 120, right: 120 },
   });
   const totRows = [];
-  totRows.push(new TableRow({ children: [totCell('Ara Toplam:', 2000), totCell(money(subtotal), 2200, { bold: true })] }));
-  if (discount > 0) totRows.push(new TableRow({ children: [totCell('İndirim:', 2000), totCell('-' + money(discount), 2200, { bold: true, color: '16A34A' })] }));
-  totRows.push(new TableRow({ children: [totCell(`KDV (%${quote.tax_rate}):`, 2000), totCell(money(tax), 2200, { bold: true })] }));
-  totRows.push(new TableRow({ children: [totCell('GENEL TOPLAM', 2000, { bold: true, fontSize: 24, color: 'FFFFFF', bg: redColor }), totCell(money(total), 2200, { bold: true, fontSize: 24, color: 'FFFFFF', bg: redColor })] }));
+  // Kur çevrimi yok: her para birimi kendi toplam bloğunda.
+  gruplar.forEach((g, gi) => {
+    if (gi) totRows.push(new TableRow({ children: [totCell('', 2000), totCell('', 2200)] }));
+    if (gruplar.length > 1) totRows.push(new TableRow({ children: [totCell(`${g.simge} — ${g.kod}`, 2000, { bold: true }), totCell('', 2200)] }));
+    totRows.push(new TableRow({ children: [totCell('Ara Toplam:', 2000), totCell(money(g.subtotal, g.kod), 2200, { bold: true })] }));
+    if (g.discount > 0) totRows.push(new TableRow({ children: [totCell('İndirim:', 2000), totCell('-' + money(g.discount, g.kod), 2200, { bold: true, color: '16A34A' })] }));
+    totRows.push(new TableRow({ children: [totCell(`KDV (%${quote.tax_rate}):`, 2000), totCell(money(g.tax, g.kod), 2200, { bold: true })] }));
+    totRows.push(new TableRow({ children: [totCell('GENEL TOPLAM', 2000, { bold: true, fontSize: 24, color: 'FFFFFF', bg: redColor }), totCell(money(g.total, g.kod), 2200, { bold: true, fontSize: 24, color: 'FFFFFF', bg: redColor })] }));
+  });
 
   const doc = new Document({
     sections: [{
@@ -1331,8 +1367,8 @@ app.get('/teklif/:id/word', auth, async (req, res) => {
         new Table({
           rows: [new TableRow({
             children: [
-              new TableCell({ children: [new Paragraph({ text: '________________________', alignment: AlignmentType.CENTER, spacing: { before: 400 } }), new Paragraph({ text: 'Müşteri İmza / Kaşe', alignment: AlignmentType.CENTER })], borders: noBorder, width: { size: 4513, type: WidthType.DXA } }),
-              new TableCell({ children: [new Paragraph({ text: '________________________', alignment: AlignmentType.CENTER, spacing: { before: 400 } }), new Paragraph({ text: 'Yetkili İmza / Kaşe', alignment: AlignmentType.CENTER })], borders: noBorder, width: { size: 4513, type: WidthType.DXA } }),
+              new TableCell({ children: [new Paragraph({ text: '________________________', alignment: AlignmentType.CENTER, spacing: { before: 1200 } }), new Paragraph({ text: 'Müşteri İmza / Kaşe', alignment: AlignmentType.CENTER })], borders: noBorder, width: { size: 4513, type: WidthType.DXA } }),
+              new TableCell({ children: [new Paragraph({ text: '________________________', alignment: AlignmentType.CENTER, spacing: { before: 1200 } }), new Paragraph({ text: 'Yetkili İmza / Kaşe', alignment: AlignmentType.CENTER })], borders: noBorder, width: { size: 4513, type: WidthType.DXA } }),
             ]
           })],
           width: { size: 9026, type: WidthType.DXA },

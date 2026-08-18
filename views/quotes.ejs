@@ -36,7 +36,14 @@
           </td>
           <td class="py-3 px-4 text-muted"><%= q.quote_date %></td>
           <td class="py-3 px-4 text-muted"><%= q.valid_until || '-' %></td>
-          <td class="py-3 px-4 text-right font-bold"><%= q.subtotal ? money(q.subtotal) : '-' %></td>
+          <td class="py-3 px-4 text-right font-bold">
+            <%# Bir teklifte birden çok para birimi olabildiği için tek toplam yok %>
+            <% if (!q.gruplar.length || !q.gruplar.some(function(g){return g.total;})) { %>-<% } else { %>
+              <% q.gruplar.filter(function(g){return g.total;}).forEach(function (g) { %>
+              <div class="whitespace-nowrap"><%= paraYaz(g.total, g.kod) %></div>
+              <% }) %>
+            <% } %>
+          </td>
           <td class="py-3 px-4 text-center">
             <span class="px-2 py-1 rounded-full text-xs font-bold <%=
               q.status==='Onaylandı'?'bg-green-900/50 text-green-400':

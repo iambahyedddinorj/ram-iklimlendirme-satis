@@ -21,23 +21,27 @@
     thead th:first-child { border-radius:6px 0 0 0; }
     thead th:last-child { border-radius:0 6px 0 0; }
     tbody td { padding:10px 12px; border-bottom:1px solid #eee; }
+    /* Tutarlar iki satıra bölünmesin */
+    tbody td:nth-last-child(-n+2), thead th:nth-last-child(-n+2) { white-space:nowrap; }
     tbody tr:nth-child(even) { background:#fafafa; }
     .text-right { text-align:right; }
     .text-center { text-align:center; }
-    .totals { width:300px; margin-left:auto; }
-    .totals tr td { padding:8px 12px; }
-    .totals tr:last-child { background:#2563EB; color:white; font-weight:bold; font-size:16px; border-radius:6px; }
-    .totals tr:last-child td { padding:12px; }
+    .totals { width:auto; margin-left:auto; }
+    .totals tr td { padding:8px 12px; white-space:nowrap; }
+    .totals tr td + td { min-width:118px; }
+    .totals tr.genel { background:#2563EB; color:white; font-weight:bold; font-size:16px; }
+    .totals tr.genel td { padding:12px; }
+    .totals tr.genel td:first-child { border-radius:6px 0 0 6px; }
+    .totals tr.genel td:last-child { border-radius:0 6px 6px 0; }
+    .totals .para-basliklari td { font-size:10px; letter-spacing:1px; color:#999; padding:0 12px 2px; }
     .notes { background:#f8f8f8; border-radius:8px; padding:15px; margin-top:20px; }
     .notes h4 { font-size:11px; color:#2563EB; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }
-    .footer { margin-top:40px; padding-top:20px; border-top:1px solid #ddd; display:grid; grid-template-columns:1fr 1fr; gap:40px; }
+    .footer { margin-top:55px; padding-top:20px; border-top:1px solid #ddd; display:grid; grid-template-columns:1fr 1fr; gap:40px; }
     .signature { text-align:center; }
-    .signature .line { border-top:1px solid #999; margin-top:60px; padding-top:5px; font-size:11px; color:#666; }
-    .stamp { text-align:center; font-size:10px; color:#999; margin-top:30px; }
+    .signature .line { border-top:1px solid #999; margin-top:110px; padding-top:8px; font-size:11px; color:#666; }
     @media print {
       body { padding:20px; }
       @page { margin:10mm; margin-top:5mm; margin-bottom:5mm; }
-      .stamp { display:none; }
     }
     .no-print { text-align:center; margin-bottom:20px; }
     .no-print button { background:#2563EB; color:white; border:none; padding:12px 30px; border-radius:8px; font-size:14px; font-weight:bold; cursor:pointer; margin:0 5px; }
@@ -82,9 +86,8 @@
     <div class="info-box">
       <h4>Teklif Bilgileri</h4>
       <p>
-        <strong>Durum:</strong> <%= quote.status %><br>
         <strong>KDV Oranı:</strong> %<%= quote.tax_rate %><br>
-        <% if (quote.discount_value > 0) { %><strong>İndirim:</strong> <%= quote.discount_type==='percent' ? '%'+quote.discount_value : quote.discount_value+' ₺' %><% } %>
+        <% if (quote.discount_value > 0) { %><strong>İndirim:</strong> <%= quote.discount_type==='percent' ? '%'+quote.discount_value : quote.discount_value+' '+paraSimge(quote.discount_currency) %><% } %>
       </p>
     </div>
   </div>
@@ -97,8 +100,8 @@
         <th>Açıklama</th>
         <th class="text-center" style="width:65px">Miktar</th>
         <th class="text-center" style="width:55px">Birim</th>
-        <th class="text-right" style="width:100px">Birim Fiyat</th>
-        <th class="text-right" style="width:100px">Toplam</th>
+        <th class="text-right" style="width:110px">Birim Fiyat</th>
+        <th class="text-right" style="width:125px">Toplam</th>
       </tr>
     </thead>
     <tbody>
@@ -109,18 +112,40 @@
         <td style="color:#666"><%= item.description || '' %></td>
         <td class="text-center"><%= item.quantity %></td>
         <td class="text-center"><%= item.unit %></td>
-        <td class="text-right"><%= Number(item.unit_price).toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td>
-        <td class="text-right"><strong><%= (item.quantity * item.unit_price).toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</strong></td>
+        <td class="text-right"><%= paraYaz(item.unit_price, item.currency) %></td>
+        <td class="text-right"><strong><%= paraYaz(item.quantity * item.unit_price, item.currency) %></strong></td>
       </tr>
       <% }) %>
     </tbody>
   </table>
 
+  <%# Kur çevrimi yok: para birimleri toplanmıyor, yan yana sütun duruyorlar.
+      Tek para birimi varsa başlık satırı çıkmıyor, görünüm eskisiyle aynı. %>
   <table class="totals">
-    <tr><td class="text-right" style="color:#666">Ara Toplam:</td><td class="text-right"><%= subtotal.toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td></tr>
-    <% if (discount > 0) { %><tr><td class="text-right" style="color:#666">İndirim:</td><td class="text-right" style="color:#16a34a">-<%= discount.toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td></tr><% } %>
-    <tr><td class="text-right" style="color:#666">KDV (%<%= quote.tax_rate %>):</td><td class="text-right"><%= tax.toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td></tr>
-    <tr><td class="text-right">GENEL TOPLAM</td><td class="text-right"><%= total.toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td></tr>
+    <% if (gruplar.length > 1) { %>
+    <tr class="para-basliklari">
+      <td></td>
+      <% gruplar.forEach(function (g) { %><td class="text-right"><%= g.simge %> <%= g.kod %></td><% }) %>
+    </tr>
+    <% } %>
+    <tr>
+      <td class="text-right" style="color:#666">Ara Toplam:</td>
+      <% gruplar.forEach(function (g) { %><td class="text-right"><%= paraYaz(g.subtotal, g.kod) %></td><% }) %>
+    </tr>
+    <% if (gruplar.some(function (g) { return g.discount > 0; })) { %>
+    <tr>
+      <td class="text-right" style="color:#666">İndirim:</td>
+      <% gruplar.forEach(function (g) { %><td class="text-right" style="color:#16a34a"><%= g.discount > 0 ? '-' + paraYaz(g.discount, g.kod) : '' %></td><% }) %>
+    </tr>
+    <% } %>
+    <tr>
+      <td class="text-right" style="color:#666">KDV (%<%= quote.tax_rate %>):</td>
+      <% gruplar.forEach(function (g) { %><td class="text-right"><%= paraYaz(g.tax, g.kod) %></td><% }) %>
+    </tr>
+    <tr class="genel">
+      <td class="text-right">GENEL TOPLAM</td>
+      <% gruplar.forEach(function (g) { %><td class="text-right"><%= paraYaz(g.total, g.kod) %></td><% }) %>
+    </tr>
   </table>
 
   <% if (quote.notes) { %>
@@ -139,6 +164,5 @@
     </div>
   </div>
 
-  <div class="stamp">Bu teklif bilgisayar ortamında hazırlanmıştır. — Ram İklimlendirme Satış Takip Sistemi</div>
 </body>
 </html>

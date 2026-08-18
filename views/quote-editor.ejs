@@ -2,6 +2,7 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Belge Düzenleyici — Teklif #<%= quote.id %></title>
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL@20..48,100..700,0..1" rel="stylesheet">
   <style>
@@ -51,19 +52,23 @@
     table.items thead th:first-child { border-radius:6px 0 0 0; }
     table.items thead th:last-child { border-radius:0 6px 0 0; }
     table.items tbody td { padding:8px 10px; border-bottom:1px solid #eee; font-size:13px; }
+    table.items tbody td:nth-last-child(-n+3), table.items thead th:nth-last-child(-n+3) { white-space:nowrap; }
     table.items tbody tr:nth-child(even) { background:#fafafa; }
     .text-right { text-align:right; }
     .text-center { text-align:center; }
-    table.totals { width:300px; margin-left:auto; }
+    table.totals { width:auto; margin-left:auto; }
+    table.totals td + td { min-width:110px; white-space:nowrap; }
+    table.totals .para-basliklari td { font-size:10px; letter-spacing:1px; color:#999; padding:0 12px 2px; }
     table.totals td { padding:8px 12px; }
-    table.totals tr:last-child { background:#DC2626; color:white; font-weight:bold; font-size:16px; border-radius:6px; }
-    table.totals tr:last-child td { padding:12px; }
+    table.totals tr.genel { background:#2563EB; color:white; font-weight:bold; font-size:16px; }
+    table.totals tr.genel td { padding:12px; }
+    table.totals tr.genel td:first-child { border-radius:6px 0 0 6px; }
+    table.totals tr.genel td:last-child { border-radius:0 6px 6px 0; }
     .notes-box { background:#f8f8f8; border-radius:8px; padding:15px; margin-top:20px; }
     .notes-box h4 { font-size:11px; color:#DC2626; text-transform:uppercase; letter-spacing:1px; margin-bottom:5px; }
-    .sig-grid { margin-top:40px; padding-top:20px; border-top:1px solid #ddd; display:grid; grid-template-columns:1fr 1fr; gap:40px; }
+    .sig-grid { margin-top:55px; padding-top:20px; border-top:1px solid #ddd; display:grid; grid-template-columns:1fr 1fr; gap:40px; }
     .sig-box { text-align:center; }
-    .sig-box .line { border-top:1px solid #999; margin-top:60px; padding-top:5px; font-size:11px; color:#666; }
-    .stamp { text-align:center; font-size:10px; color:#999; margin-top:30px; }
+    .sig-box .line { border-top:1px solid #999; margin-top:110px; padding-top:8px; font-size:11px; color:#666; }
 
     /* Row actions */
     .row-actions { opacity:0; transition:opacity .2s; display:flex; gap:2px; }
@@ -87,6 +92,22 @@
       [contenteditable] { border:none !important; }
       body { background:white; }
       @page { margin:15mm; }
+    }
+
+    /* ── Telefon ──
+       Belge bilerek A4 (210mm) genişliğinde: düzenleyici, kâğıda ne
+       basılacağını birebir gösteriyor. Yeniden dizmek yerine olduğu gibi
+       küçültülüyor; ölçek aşağıdaki betikte hesaplanıyor. */
+    @media (max-width: 900px) {
+      .toolbar { position: static; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+      .toolbar h2 { font-size: 13px; width: 100%; }
+      .toolbar .save-status { width: 100%; font-size: 11px; }
+      .toolbar .actions { width: 100%; gap: 6px; }
+      .toolbar .actions a, .toolbar .actions button { flex: 1 1 auto; justify-content: center; padding: 7px 8px; font-size: 11px; }
+      .toolbar .actions .material-symbols-outlined { font-size: 14px !important; }
+      .doc-wrapper { margin-top: 0; padding: 10px; display: block; }
+      .document { zoom: var(--olcek, 1); margin: 0 auto; box-shadow: 0 2px 16px rgba(0,0,0,.4); }
+      .row-actions { opacity: 1; }
     }
   </style>
 </head>
@@ -148,9 +169,14 @@
           <strong>İndirim:</strong>
           <select data-field="discount_type" class="edit-input" style="width:auto;font-size:12px" id="disc-type">
             <option value="percent" <%= quote.discount_type==='percent'?'selected':'' %>>%</option>
-            <option value="amount" <%= quote.discount_type==='amount'?'selected':'' %>>₺</option>
+            <option value="amount" <%= quote.discount_type==='amount'?'selected':'' %>>Tutar</option>
           </select>
           <input class="edit-input" type="number" value="<%= quote.discount_value || 0 %>" data-field="discount_value" style="width:50px;font-size:12px" id="disc-value">
+          <select data-field="discount_currency" class="edit-input calc" style="width:auto;font-size:12px" id="disc-cur">
+            <% Object.entries(PARA_BIRIMLERI).forEach(([kod,pb]) => { %>
+            <option value="<%= kod %>" <%= paraKodu(quote.discount_currency)===kod?'selected':'' %>><%= pb.simge %></option>
+            <% }) %>
+          </select>
         </p>
       </div>
     </div>
@@ -163,8 +189,9 @@
           <th>Açıklama</th>
           <th class="text-center" style="width:65px">Miktar</th>
           <th class="text-center" style="width:55px">Birim</th>
-          <th class="text-right" style="width:100px">Birim Fiyat</th>
-          <th class="text-right" style="width:100px">Toplam</th>
+          <th class="text-right" style="width:90px">Birim Fiyat</th>
+          <th class="text-center" style="width:45px">Para</th>
+          <th class="text-right" style="width:110px">Toplam</th>
           <th style="width:40px"></th>
         </tr>
       </thead>
@@ -177,7 +204,13 @@
           <td class="text-center"><input class="edit-input item-qty calc" type="number" step="0.01" value="<%= item.quantity %>" style="text-align:center;width:50px" min="0"></td>
           <td class="text-center"><input class="edit-input item-unit" value="<%= item.unit %>" style="text-align:center;width:50px" placeholder="Adet"></td>
           <td class="text-right"><input class="edit-input item-price calc" type="number" step="0.01" value="<%= item.unit_price %>" style="text-align:right;width:80px" min="0"></td>
-          <td class="text-right item-total" style="font-weight:bold"><%= (item.quantity * item.unit_price).toLocaleString('tr-TR', {minimumFractionDigits:2}) %> ₺</td>
+          <td class="text-center"><select class="edit-input item-cur calc" style="text-align:center;width:40px">
+            <% Object.entries(PARA_BIRIMLERI).forEach(([kod,pb]) => { %>
+            <option value="<%= kod %>" <%= paraKodu(item.currency)===kod?'selected':'' %>><%= pb.simge %></option>
+            <% }) %>
+          </select></td>
+          <td class="text-center"><select class="edit-input item-cur calc" style="text-align:center;width:40px">${PARA_SECENEKLERI}</select></td>
+    <td class="text-right item-total" style="font-weight:bold"></td>
           <td>
             <div class="row-actions">
               <button onclick="removeRow(this)" title="Sil"><span class="material-symbols-outlined">close</span></button>
@@ -192,12 +225,8 @@
       <span class="material-symbols-outlined" style="font-size:18px">add_circle</span> Yeni Kalem Ekle
     </button>
 
-    <table class="totals" style="margin-top:20px">
-      <tr><td class="text-right" style="color:#666">Ara Toplam:</td><td class="text-right" id="ft-sub">0 ₺</td></tr>
-      <tr id="ft-disc-row" style="display:none"><td class="text-right" style="color:#666">İndirim:</td><td class="text-right" style="color:#16a34a" id="ft-disc">0 ₺</td></tr>
-      <tr><td class="text-right" style="color:#666" id="ft-tax-label">KDV (%20):</td><td class="text-right" id="ft-tax">0 ₺</td></tr>
-      <tr><td class="text-right">GENEL TOPLAM</td><td class="text-right" id="ft-total">0 ₺</td></tr>
-    </table>
+    <%# Para birimi başına toplam; calcTotals() üretir. %>
+    <div id="totals-wrap" style="margin-top:20px"></div>
 
     <div class="notes-box">
       <h4>Notlar</h4>
@@ -208,44 +237,64 @@
       <div class="sig-box"><div class="line">Müşteri İmza / Kaşe</div></div>
       <div class="sig-box"><div class="line">Yetkili İmza / Kaşe</div></div>
     </div>
-    <div class="stamp">Bu teklif bilgisayar ortamında hazırlanmıştır. — Ram İklimlendirme Satış Takip Sistemi</div>
   </div>
 </div>
 
 <script>
 const quoteId = <%= quote.id %>;
-const money = n => Number(n||0).toLocaleString('tr-TR',{minimumFractionDigits:2})+' ₺';
+const PARA_SIMGE = <%- JSON.stringify(Object.fromEntries(Object.entries(PARA_BIRIMLERI).map(([k,v]) => [k, v.simge]))) %>;
+const VARSAYILAN_PARA = '<%= VARSAYILAN_PARA %>';
+const money = (n, kod) => Number(n||0).toLocaleString('tr-TR',{minimumFractionDigits:2}) + ' ' + (PARA_SIMGE[kod] || PARA_SIMGE[VARSAYILAN_PARA]);
 
 function calcTotals(){
-  let sub = 0;
+  // Kalemler para birimine göre gruplanıyor; farklı birimler toplanmaz.
+  const gruplar = new Map();
   document.querySelectorAll('#items-body tr').forEach((tr,i) => {
     tr.querySelector('.item-no').textContent = i+1;
     const q = parseFloat(tr.querySelector('.item-qty').value)||0;
     const p = parseFloat(tr.querySelector('.item-price').value)||0;
+    const c = tr.querySelector('.item-cur')?.value || VARSAYILAN_PARA;
     const t = q*p;
-    sub += t;
-    tr.querySelector('.item-total').textContent = money(t);
+    gruplar.set(c, (gruplar.get(c)||0) + t);
+    tr.querySelector('.item-total').textContent = money(t, c);
   });
+
   const taxRate = parseFloat(document.getElementById('tax-rate').value)||0;
   const discType = document.getElementById('disc-type').value;
   const discVal = parseFloat(document.getElementById('disc-value').value)||0;
-  let disc = discType==='percent' ? sub*discVal/100 : discVal;
-  const afterDisc = sub - disc;
-  const tax = afterDisc * taxRate/100;
-  const total = afterDisc + tax;
+  const discCur = document.getElementById('disc-cur')?.value || VARSAYILAN_PARA;
 
-  document.getElementById('ft-sub').textContent = money(sub);
-  if(disc > 0){
-    document.getElementById('ft-disc-row').style.display = '';
-    document.getElementById('ft-disc').textContent = '-'+money(disc);
-  } else {
-    document.getElementById('ft-disc-row').style.display = 'none';
-  }
-  document.getElementById('ft-tax-label').textContent = 'KDV (%'+taxRate+'):';
-  document.getElementById('ft-tax').textContent = money(tax);
-  document.getElementById('ft-total').textContent = money(total);
+  if (!gruplar.size) gruplar.set(VARSAYILAN_PARA, 0);
+  const cokluMu = gruplar.size > 1;
+
+  const hesap = [...gruplar.keys()].map(kod => {
+    const sub = gruplar.get(kod);
+    let disc = 0;
+    if (discType === 'percent') disc = sub * discVal / 100;
+    else if (kod === discCur) disc = Math.min(discVal, sub);
+    const afterDisc = sub - disc;
+    const tax = afterDisc * taxRate / 100;
+    return { kod, sub, disc, tax, total: afterDisc + tax };
+  });
+  const sag = (v, st) => '<td class="text-right"' + (st ? ' style="' + st + '"' : '') + '>' + v + '</td>';
+
+  let html = '<table class="totals">';
+  if (cokluMu) html += '<tr class="para-basliklari"><td></td>'
+    + hesap.map(h => sag((PARA_SIMGE[h.kod]||'') + ' ' + h.kod)).join('') + '</tr>';
+  html += '<tr><td class="text-right" style="color:#666">Ara Toplam:</td>'
+    + hesap.map(h => sag(money(h.sub, h.kod))).join('') + '</tr>';
+  if (hesap.some(h => h.disc > 0)) html += '<tr><td class="text-right" style="color:#666">İndirim:</td>'
+    + hesap.map(h => sag(h.disc > 0 ? '-' + money(h.disc, h.kod) : '', 'color:#16a34a')).join('') + '</tr>';
+  html += '<tr><td class="text-right" style="color:#666">KDV (%' + taxRate + '):</td>'
+    + hesap.map(h => sag(money(h.tax, h.kod))).join('') + '</tr>';
+  html += '<tr class="genel"><td class="text-right">GENEL TOPLAM</td>'
+    + hesap.map(h => sag(money(h.total, h.kod))).join('') + '</tr>';
+  html += '</table>';
+
+  document.getElementById('totals-wrap').innerHTML = html;
 }
 
+const PARA_SECENEKLERI = Object.entries(PARA_SIMGE).map(([k,v]) => '<option value="'+k+'">'+v+'</option>').join('');
 function addRow(){
   const tbody = document.getElementById('items-body');
   const n = tbody.children.length + 1;
@@ -257,11 +306,11 @@ function addRow(){
     <td class="text-center"><input class="edit-input item-qty calc" type="number" step="0.01" value="1" style="text-align:center;width:50px" min="0"></td>
     <td class="text-center"><input class="edit-input item-unit" value="Adet" style="text-align:center;width:50px"></td>
     <td class="text-right"><input class="edit-input item-price calc" type="number" step="0.01" value="0" style="text-align:right;width:80px" min="0"></td>
-    <td class="text-right item-total" style="font-weight:bold">0,00 ₺</td>
+    <td class="text-right item-total" style="font-weight:bold"></td>
     <td><div class="row-actions" style="opacity:1"><button onclick="removeRow(this)" title="Sil"><span class="material-symbols-outlined">close</span></button></div></td>
   `;
   tbody.appendChild(tr);
-  tr.querySelectorAll('.calc').forEach(el => el.addEventListener('input', calcTotals));
+  tr.querySelectorAll('.calc').forEach(el => { el.addEventListener('input', calcTotals); el.addEventListener('change', calcTotals); });
   tr.querySelector('.item-name').focus();
   calcTotals();
 }
@@ -289,6 +338,7 @@ async function saveDoc(){
       quantity: parseFloat(tr.querySelector('.item-qty')?.value)||1,
       unit: tr.querySelector('.item-unit')?.value||'Adet',
       unit_price: parseFloat(tr.querySelector('.item-price')?.value)||0,
+      currency: tr.querySelector('.item-cur')?.value || VARSAYILAN_PARA,
     });
   });
 
@@ -296,6 +346,14 @@ async function saveDoc(){
     const el = document.querySelector('[data-field="'+f+'"]');
     if(!el) return '';
     if(el.tagName==='INPUT'||el.tagName==='SELECT') return el.value;
+    // Şirket adının içinde alt başlık ayrı bir alan olarak duruyor.
+    // textContent iç içe alanı da katıyordu; her kayıtta şirket adının
+    // sonuna alt başlık ekleniyor, ad kayıt başına uzuyordu.
+    if (el.querySelector('[data-field]')) {
+      return Array.from(el.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent).join('').trim();
+    }
     return el.textContent.trim();
   };
 
@@ -309,6 +367,7 @@ async function saveDoc(){
     status: getField('status'),
     discount_type: getField('discount_type'),
     discount_value: getField('discount_value'),
+    discount_currency: getField('discount_currency'),
     tax_rate: getField('tax_rate'),
     notes: getField('notes'),
     items: items,
@@ -340,6 +399,29 @@ document.getElementById('disc-type').addEventListener('change', calcTotals);
 document.getElementById('disc-value').addEventListener('input', calcTotals);
 
 calcTotals();
+</script>
+<script>
+// A4 sayfa 210mm (≈794px). Dar ekranda yeniden dizmek yerine küçültüyoruz.
+// transform değil zoom: sarmalayıcının yüksekliği de küçülsün.
+(function olcekle() {
+  var belge = document.querySelector('.document');
+  var sarmal = document.querySelector('.doc-wrapper');
+  if (!belge || !sarmal) return;
+  var TAM = 210 * 96 / 25.4;
+  var deneme = 0;
+
+  function uygula() {
+    var yer = sarmal.clientWidth - 20;
+    if (yer <= 0) { if (deneme++ < 30) requestAnimationFrame(uygula); return; }
+    deneme = 0;
+    belge.style.setProperty('--olcek', Math.min(1, yer / TAM).toFixed(3));
+  }
+
+  uygula();
+  addEventListener('load', uygula);
+  if (window.ResizeObserver) new ResizeObserver(uygula).observe(sarmal);
+  else addEventListener('resize', uygula);
+})();
 </script>
 </body>
 </html>

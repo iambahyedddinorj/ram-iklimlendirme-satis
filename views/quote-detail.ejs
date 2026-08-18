@@ -51,10 +51,18 @@
   <div class="bg-surface border border-border rounded-xl p-6">
     <h3 class="text-red font-bold mb-4 flex items-center gap-2"><span class="material-symbols-outlined icon-fill">payments</span> Toplam</h3>
     <div class="space-y-2 text-sm">
-      <div class="flex justify-between"><span class="text-muted">Ara Toplam</span><span><%= money(subtotal) %></span></div>
-      <% if (discount > 0) { %><div class="flex justify-between"><span class="text-muted">İndirim</span><span class="text-green-400">-<%= money(discount) %></span></div><% } %>
-      <div class="flex justify-between"><span class="text-muted">KDV (%<%= quote.tax_rate %>)</span><span><%= money(tax) %></span></div>
-      <div class="flex justify-between pt-2 border-t border-border"><span class="text-lg font-bold">TOPLAM</span><span class="text-2xl font-bold text-green-400"><%= money(total) %></span></div>
+      <%# Farklı para birimleri toplanmıyor; her biri kendi bloğunda %>
+      <% gruplar.forEach(function (g, gi) { %>
+      <div class="<%= gi ? 'mt-4 pt-3 border-t border-border/40' : '' %>">
+        <% if (gruplar.length > 1) { %>
+        <div class="text-xs text-muted tracking-wider mb-1"><%= g.simge %> — <%= g.kod %></div>
+        <% } %>
+        <div class="flex justify-between"><span class="text-muted">Ara Toplam</span><span><%= paraYaz(g.subtotal, g.kod) %></span></div>
+        <% if (g.discount > 0) { %><div class="flex justify-between"><span class="text-muted">İndirim</span><span class="text-green-400">-<%= paraYaz(g.discount, g.kod) %></span></div><% } %>
+        <div class="flex justify-between"><span class="text-muted">KDV (%<%= quote.tax_rate %>)</span><span><%= paraYaz(g.tax, g.kod) %></span></div>
+        <div class="flex justify-between pt-2 border-t border-border"><span class="text-lg font-bold">TOPLAM</span><span class="text-2xl font-bold text-green-400"><%= paraYaz(g.total, g.kod) %></span></div>
+      </div>
+      <% }) %>
     </div>
   </div>
 </div>
@@ -80,8 +88,8 @@
           <td class="py-3 pr-3 text-muted"><%= item.description || '-' %></td>
           <td class="py-3 pr-3 text-center"><%= item.quantity %></td>
           <td class="py-3 pr-3 text-center"><%= item.unit %></td>
-          <td class="py-3 pr-3 text-right"><%= money(item.unit_price) %></td>
-          <td class="py-3 text-right font-bold text-green-400"><%= money(item.quantity * item.unit_price) %></td>
+          <td class="py-3 pr-3 text-right"><%= paraYaz(item.unit_price, item.currency) %></td>
+          <td class="py-3 text-right font-bold text-green-400"><%= paraYaz(item.quantity * item.unit_price, item.currency) %></td>
         </tr>
         <% }) %>
       </tbody>
