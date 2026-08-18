@@ -47,9 +47,12 @@
   var logo = document.getElementById('loginLogo');
   var userInput = document.getElementById('username');
   var loginBtn = document.getElementById('loginBtn');
-  function selectPortal(p) {
+  // kullaniciAdiniDoldur=false ile açılışta kutu boş bırakılıyor: Yönetici
+  // sekmesi kalktığı için kutuda hazır duran "bayi" yöneticinin girişini
+  // engelliyordu. Sekmeye basınca yine doluyor.
+  function selectPortal(p, kullaniciAdiniDoldur) {
     logo.src = LOGOS[p];
-    userInput.value = p;
+    if (kullaniciAdiniDoldur !== false) userInput.value = p;
     loginBtn.style.background = COLORS[p];
     tabs.forEach(function(t){
       var on = t.dataset.portal === p;
@@ -59,7 +62,7 @@
     });
   }
   tabs.forEach(function(t){ t.addEventListener('click', function(){ selectPortal(t.dataset.portal); }); });
-  selectPortal('bayi');
+  selectPortal('bayi', false);
 
 </script>
 </body>
